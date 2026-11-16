@@ -270,6 +270,52 @@ void budgetTests() {
     check(!find(nullptr, Page{}.size(), off), "budget rejects null input");
 }
 #endif
+void vp9RegistryTests() {
+#ifdef NRED_HAS_VP9_POLICY
+    using namespace VP9PluginAllowlist;
+    Page original{};
+    std::memcpy(original.data() + Offset, Original, sizeof(Original));
+    UserPatches p;
+    p.vp9RegistryEnabled = true;
+    for (int fault = 0; fault < 4; ++fault) {
+        auto page = original;
+        invoke(p, page, "dyld_shared_cache_x86_64h", PageOffset);
+        check(std::memcmp(page.data() + Offset, Replacement, sizeof(Replacement)) == 0,
+              "VP9 policy applies to fresh page");
+        auto after = page;
+        const auto writes = MachInfo::writes;
+        invoke(p, page, "dyld_shared_cache_x86_64h", PageOffset);
+        check(page == after && MachInfo::writes == writes, "VP9 policy is idempotent");
+    }
+    for (size_t i = 0; i < sizeof(Original); ++i) {
+        auto page = original;
+        page[Offset + i] ^= 1;
+        const auto before = page;
+        invoke(p, page, "dyld_shared_cache_x86_64h", PageOffset);
+        check(page == before, "VP9 rejects changed policy byte " + std::to_string(i));
+    }
+    for (const auto* name : {"dyld_shared_cache_x86_64h.01", "dyld_shared_cache_x86_64",
+                             "dyld_shared_cache_other", "unrelated.bin"}) {
+        auto page = original;
+        invoke(p, page, name, PageOffset);
+        check(page == original, std::string("VP9 rejects vnode ") + name);
+    }
+    for (auto offset : {0ULL, PageOffset + 4096, PageOffset - 4096}) {
+        auto page = original;
+        invoke(p, page, "dyld_shared_cache_x86_64h", offset);
+        check(page == original, "VP9 rejects other cache pages");
+    }
+    auto page = original;
+    p.vp9RegistryEnabled = false;
+    invoke(p, page, "dyld_shared_cache_x86_64h", PageOffset);
+    check(page == original, "VP9 policy defaults off");
+    p.vp9RegistryEnabled = true;
+    MachInfo::rejectWrites = true;
+    invoke(p, page, "dyld_shared_cache_x86_64h", PageOffset);
+    MachInfo::rejectWrites = false;
+    check(page == original, "VP9 leaves policy intact if writing fails");
+#endif
+}
 int main(int argc, char** argv) {
     graphicsTests(kResolverSignatures_Ventura, "Ventura");
     graphicsTests(kResolverSignatures_Sonoma, "Sonoma");
@@ -287,6 +333,7 @@ int main(int argc, char** argv) {
 #ifdef NRED_HAS_GL_BUDGET
     budgetTests();
 #endif
+    vp9RegistryTests();
     check(MachInfo::writes == MachInfo::restores, "every successful write restores protection");
     printf("%u checks, %u failures; no GPU work submitted\n", checks, failures);
     return failures ? 1 : 0;
@@ -317,6 +364,11 @@ def main():
             r"^#(?:include|pragma).*$", "",
             read("GLResourceBudgetPatch.hpp"), flags=re.M,
         )
+    policy_header = ""
+    if "VP9PluginAllowlist::" in source:
+        policy_header = "#define NRED_HAS_VP9_POLICY 1\n" + re.sub(
+            r"^#pragma.*$", "", read("VP9PluginAllowlist.inc"), flags=re.M,
+        )
     start = source.index("namespace\n{")
     end = source.index("}    // namespace", start) + 1
     tables = source[start:end].replace('#include "VDASignatures.inc"', read("VDASignatures.inc"))
@@ -326,7 +378,7 @@ def main():
     methods += function(source, "void UserPatches::patchSignaturePage(")
     with tempfile.TemporaryDirectory(prefix="nred-page-test-") as temp:
         unit, binary = Path(temp) / "test.cpp", Path(temp) / "test"
-        unit.write_text(STUBS + budget_header + header + tables + methods + TESTS)
+        unit.write_text(STUBS + budget_header + policy_header + header + tables + methods + TESTS)
         subprocess.run([
             "xcrun", "clang++", "-std=c++17", "-O1", "-g",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",

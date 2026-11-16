@@ -47,7 +47,7 @@ namespace
         media.vcnFenceSize  = 0x1000;     // 4 KiB, planning default until the real size is validated
         media.decode.h264   = true;
         media.decode.hevc   = true;
-        media.decode.av1    = false;    // AV1 decode starts with VCN 4.0.
+        media.decode.av1    = false;    // These gfx9 APUs have VCN 1/2 and no AV1 decoder.
         return media;
     }
 

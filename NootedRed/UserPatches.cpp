@@ -28,6 +28,7 @@
 #include <NRed.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <UserPatches.hpp>
+#include <VP9PluginAllowlist.inc>
 #include <VCNBridge.hpp>
 #include <libkern/OSAtomic.h>
 #include <libkern/OSTypes.h>
@@ -290,6 +291,7 @@ void UserPatches::init()
                             && !checkKernelArgument(kBootArgGLFixNoResolve);
 
     this->vdaEnabled = !checkKernelArgument(kBootArgNoVDA);
+    this->vp9RegistryEnabled = this->vdaEnabled && checkKernelArgument("-NRedVP9");
 
     if (!this->enabled && !this->vdaEnabled) {
         DBGLOG("UserPatch", "User-space driver patches are disabled");
@@ -400,6 +402,13 @@ void UserPatches::processPatcher(KernelPatcher& patcher)
         SYSLOG("UserPatch", "VDA patches requested but this profile does not enable the validated VCN 2.x target");
         this->vdaEnabled = false;
     }
+    this->vp9RegistryEnabled = this->vp9RegistryEnabled && vdaAllowed
+                               && getKernelVersion() == KernelVersion::Tahoe
+                               && NRed::singleton().getDeviceID() == 0x1636;
+    NRed::singleton().setProp32("NRedVP9RegistryEnabled", this->vp9RegistryEnabled ? 1 : 0);
+    if (this->vp9RegistryEnabled) {
+        SYSLOG("UserPatch", "Optional VP9 registry policy: allowing decoder cdhash %s", VP9PluginAllowlist::CDHash);
+    }
 
     if (currentKernelVersion() >= MACOS_11) {
         if (!glEnabled && !this->vdaEnabled) {
@@ -501,6 +510,7 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
     const bool isAppleGVA    = (strstr(vnodeName, "AppleGVA") != nullptr);
     const bool isSharedCache = (strstr(vnodeName, "dyld_shared_cache") != nullptr) ||
                                (strstr(vnodeName, "dyld") != nullptr);
+    const bool isVP9Cache = strcmp(vnodeName, "dyld_shared_cache_x86_64h") == 0;
     vnode_putname(vnodeName);
 
     if (!isGLDriver && !isVADriver && !isAppleGVA && !isSharedCache) {
@@ -508,6 +518,28 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
     }
 
     const auto* const bytes = static_cast<const UInt8*>(data);
+
+    // Optional /Library VP9 plugin support. Keep CoreMedia's original Apple
+    // signature policy and add exactly the paired decoder's cdhash. Unlike a
+    // branch bypass, unrelated third-party plugins still fail validation.
+    // The validated Tahoe cache file, file page, in-page offset and complete
+    // 200-byte original requirement must all match. Reclaimed pages are
+    // rechecked; telemetry never suppresses patching a fresh clean page.
+    if (this->vp9RegistryEnabled && isVP9Cache &&
+        pageOffset == VP9PluginAllowlist::PageOffset &&
+        memcmp(bytes + VP9PluginAllowlist::Offset, VP9PluginAllowlist::Original,
+               sizeof(VP9PluginAllowlist::Original)) == 0) {
+        if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) {
+            SYSLOG("UserPatch", "Failed to enable writing for the optional VP9 registry policy");
+            return;
+        }
+        memcpy(const_cast<UInt8*>(bytes) + VP9PluginAllowlist::Offset, VP9PluginAllowlist::Replacement,
+               sizeof(VP9PluginAllowlist::Replacement));
+        MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+        const auto applied = static_cast<UInt32>(OSIncrementAtomic(&this->vp9RegistryApplied) + 1);
+        NRed::singleton().setProp32("NRedVP9RegistryApplied", applied);
+        this->tracePatch("VP9 registry policy", 0, pageOffset, VP9PluginAllowlist::Offset);
+    }
 
     // VDA Dynamic Resolver path (AMDRadeonVADriver2: embedded in dyld_shared_cache or loose bundle)
     // Validation state belongs to a resident page, not to the lifetime of this kext. A clean file page

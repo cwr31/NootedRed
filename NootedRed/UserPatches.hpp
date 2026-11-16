@@ -163,6 +163,8 @@ private:
 
     bool                  enabled{false};
     bool                  vdaEnabled{false};
+    bool                  vp9RegistryEnabled{false};
+    volatile UInt32       vp9RegistryApplied{0};
 
     void selectPatchSet();
     auto currentApuMask() const -> ApuMask;
