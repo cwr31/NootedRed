@@ -202,6 +202,37 @@
         }
       ],
       "masked_sha256": "fb8b5282fe33109c06063471ae8109952dfbd2afa56ae2e39f4549c58c887768"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b5d000",
+      "sites": [
+        {
+          "offset": 981,
+          "find": "448bbb14b30000",
+          "replace": "41bf0010000090",
+          "symbol": "__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo"
+        },
+        {
+          "offset": 1509,
+          "find": "8b8320b30000",
+          "replace": "8b8324b30000",
+          "symbol": "__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo"
+        },
+        {
+          "offset": 1540,
+          "find": "8b8328b30000",
+          "replace": "b80011000090",
+          "symbol": "__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo"
+        },
+        {
+          "offset": 1576,
+          "find": "448ba304b30000",
+          "replace": "41bc0000200290",
+          "symbol": "__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo"
+        }
+      ],
+      "masked_sha256": "75c1b37a08fa3ff280a355e0c78689e77cf119b3dc04957b49fbd0c573c70f41"
     }
   ]
 }

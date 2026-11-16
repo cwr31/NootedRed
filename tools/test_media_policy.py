@@ -90,6 +90,15 @@ int main() {
     auto* profile = DeviceProfile::current();
     check(v.canAdvertise() && !b.userPatchesAllowed(), "personality bootstrap does not require allocated engine");
     check(v.isHEVC10EncodeAllowed(), "validated Renoir can advertise Main10 before engine allocation");
+    check(v.isHEVC8KDecodeAllowed(), "validated Renoir can advertise 8K before engine allocation");
+    v.hevc10Allowed = false;
+    check(v.isHEVC8KDecodeAllowed(), "Main-only policy retains 8K Main decode");
+    v.hevc10Allowed = true;
+    for (bool* flag : {&v.enabled, &v.hevcAllowed}) {
+        *flag = false;
+        check(!v.isHEVC8KDecodeAllowed(), "media/HEVC opt-outs block 8K advertisement");
+        *flag = true;
+    }
     for (bool* flag : {&v.enabled, &v.hevcAllowed, &v.hevc10Allowed}) {
         *flag = false;
         check(!v.isHEVC10EncodeAllowed(), "each media/HEVC/Main10 boot opt-out blocks Main10 encode");
@@ -97,6 +106,7 @@ int main() {
     }
     NRed::singleton().device = 0x1638;
     check(!v.isHEVC10EncodeAllowed(), "untested device retains Main-only encode");
+    check(!v.isHEVC8KDecodeAllowed(), "untested device retains conservative decode advertisement");
     NRed::singleton().device = 0x1636;
     v.enabled = false;
     check(!v.canAdvertise(), "NoVDA withdraws capabilities");
@@ -108,6 +118,7 @@ int main() {
         profile->media.vcnGeneration = blocked == 3 ? 0x100 : DeviceProfile::kVcn2_2;
         check(!v.canAdvertise(), "unsupported build/backend/device/dGPU never advertises bridge");
         check(!v.isHEVC10EncodeAllowed(), "unsupported media prerequisites also block Main10 encode");
+        check(!v.isHEVC8KDecodeAllowed(), "unsupported media prerequisites also block 8K decode");
     }
     UserPatches::singleton().supported = true; NRed::singleton().external = false;
     profile->media.hasVCN0 = true; profile->media.vcnGeneration = DeviceProfile::kVcn2_2;
@@ -179,6 +190,7 @@ VDA& VDA::singleton() { static VDA v; return v; }
 VCNBridge& VCNBridge::singleton() { static VCNBridge b; return b; }
 """
     for marker in ("bool VDA::isSupported(", "bool VDA::canAdvertise(", "bool VDA::isHEVC10EncodeAllowed(",
+                   "bool VDA::isHEVC8KDecodeAllowed(",
                    "void VDA::stripCapabilities(", "void VDA::withdrawCapabilities("):
         methods += function(va, marker) + "\n"
     for marker in ("bool VCNBridge::loadReady(", "void VCNBridge::setAccelerator(",

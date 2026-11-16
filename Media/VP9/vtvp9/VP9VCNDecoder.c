@@ -99,10 +99,6 @@ typedef struct {
 // decodes.
 #define MAX_QUEUED 4
 
-// What has been tested on the GPU so far. Nothing has exercised 8K with VP9.
-#define MAX_WIDTH 4096
-#define MAX_HEIGHT 2304
-
 static os_log_t logger(void) {
   static os_log_t l;
   static dispatch_once_t once;
@@ -192,7 +188,7 @@ static OSStatus dec_start_session(VTVideoDecoderRef dec,
   s->width = dim.width;
   s->height = dim.height;
   s->tenBit = false;
-  if (s->width > MAX_WIDTH || s->height > MAX_HEIGHT)
+  if (!vcnvp9_dimensions_supported(s->width, s->height))
     return kVTVideoDecoderUnsupportedDataFormatErr;
 
   CFDataRef vpcC = copy_vpcC(fmt);
@@ -214,7 +210,7 @@ static OSStatus dec_start_session(VTVideoDecoderRef dec,
 
   char err[256] = "";
   vcnvp9_gpu_armed = 1;
-  s->vcn = vcnvp9_create(MAX_WIDTH, MAX_HEIGHT, err, sizeof(err));
+  s->vcn = vcnvp9_create(VCN_VP9_MAX_WIDTH, VCN_VP9_MAX_HEIGHT, err, sizeof(err));
   if (!s->vcn) {
     os_log_error(logger(), "vcnvp9_create: %{public}s", err);
     return kVTVideoDecoderNotAvailableNowErr;

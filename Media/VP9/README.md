@@ -21,10 +21,17 @@ Mesa's `ac_vcn_dec.c` sets that field only for VCN 3 and newer. The Renoir path
 also requires the validated AMDRadeonVADriver2 UUID
 `1181E2CA-31B3-3DF0-90E2-3AE70552D753`. A different driver is rejected.
 
-Profiles 0 and 2, 4:2:0, 8/10-bit, at up to 4096x2304 are accepted by the plugin.
+Profiles 0 and 2, 4:2:0, 8/10-bit, are accepted up to 8192 pixels wide,
+4352 pixels high, and **35,389,440 pixels per frame**. These limits apply
+together: 8192x4320 and 7680x4352 fit; 8192x4352 is rejected. The latter
+produced incorrect inter-frame chroma in the current tier-0 driver/firmware
+path even with a larger DPB. See the [capability audit](../../analysis/media-capability-20261116.md).
 VCN 2 requires a large fixed DPB (about 456 MiB); this is separate from the GL
 resource-list budget correction. Do not reduce that buffer as a performance
 shortcut.
+
+The parser also excludes a preceding keyframe from motion-vector reuse, as
+libvpx does. A keyframe's `intra_only` syntax bit alone cannot express this.
 
 ## Build
 
@@ -34,6 +41,7 @@ From the repository root:
 zsh Media/VP9/build.sh
 python3 Media/VP9/test_policy.py
 python3 Media/VP9/test_library_validation.py
+python3 Media/VP9/test_message.py
 python3 tools/test_userpatch_lifecycle.py
 tools/build-branch.sh -y
 ```
@@ -88,6 +96,13 @@ On November 16, 2026, process-local hardware tests on Renoir / 25G332 passed:
 | 1920x1080, profile 0 | 30 | CPU-decoded frame hashes, all equal |
 | 3840x2160, profile 0 | 30 | CPU-decoded frame hashes, all equal |
 | FFmpeg FATE `vp92-2-20-10bit-yuv420.webm`, profile 2 | 10 | FATE frame hashes, all equal |
+| 3840x2160, profile 2, real ten-bit source | 3 | CPU-decoded frame hashes, all equal |
+| 7680x4320, profiles 0 and 2 | 30 each | CPU-decoded frame hashes, all equal |
+| 8192x4320 and 7680x4352, profile 0 | 3 each | CPU-decoded frame hashes, all equal |
+
+The final plugin also rejects both 8-bit and 10-bit 8192x4352 format
+descriptions before creating a VCN session. This is a known remaining boundary,
+not full coverage of every rectangle advertised by a generic hardware table.
 
 The VCN decode submission/completion counters increased, with no GPU recovery.
 Paced 1080p60 and 4K60 tests decoded 300 frames each without errors, but 4K60

@@ -50,7 +50,7 @@ typedef struct {
   int16_t seg_feature_data[8][4];
   uint8_t seg_tree_probs[7], seg_pred_probs[3];
   uint32_t last_width, last_height;
-  int last_show_frame, last_intra_only, have_last;
+  int last_show_frame, last_intra_only, last_frame_type, have_last;
   char err[128];
 } VP9Parser;
 

@@ -56,6 +56,8 @@ public:
     // Main10 encode additionally requires the tested Renoir device and the
     // exact manifest containing the P010/header fixes. Boot opt-outs apply.
     bool isHEVC10EncodeAllowed() const;
+    // 8K decode requires the matching bounded resolution-check manifest.
+    bool isHEVC8KDecodeAllowed() const;
     static void stripCapabilities(OSDictionary* dictionary);
     static void withdrawCapabilities(IORegistryEntry* entry);
 

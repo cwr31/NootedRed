@@ -251,7 +251,8 @@ int vp9_parse_frame_header(VP9Parser* p, const uint8_t* data, size_t size) {
     return fail(p, "headers past the frame");
   h->use_prev_frame_mvs =
       p->have_last && !h->error_res && h->width == p->last_width &&
-      h->height == p->last_height && p->last_show_frame && !p->last_intra_only;
+      h->height == p->last_height && p->last_show_frame &&
+      !p->last_intra_only && p->last_frame_type != 0;
   return 0;
 }
 
@@ -268,6 +269,7 @@ void vp9_frame_done(VP9Parser* p, int dpb_slot) {
   p->last_height = h->height;
   p->last_show_frame = h->show_frame;
   p->last_intra_only = h->intra_only;
+  p->last_frame_type = h->frame_type;
   p->have_last = 1;
 }
 

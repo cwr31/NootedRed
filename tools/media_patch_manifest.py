@@ -69,7 +69,27 @@ HEVC_ENCODE_SITES = [
     ("__ZN23AvdVcn2HevcHeaderEncode17encodeSliceHeaderEPvS0_S0_", 0x530,
      "418bb788070000", "31f69090909090"),
 ]
-REQUIRED_SITES = 14 + len(HEVC_ENCODE_SITES)
+# Renoir's VCN2.2 HEVC decoder supports the 8192x4352 rectangle. Apple's
+# capability table already contains an 8192-wide internal-app limit, but the
+# ordinary-client branch reads the adjacent 4096-wide field. Select the wider
+# field and retain the existing minimum/profile/rate checks. Height and total
+# pixel count are bounded explicitly, rather than skipping capability checks.
+HEVC_DECODE_SITES = [
+    ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0x2B7,
+     "8b8320b30000", "8b8324b30000"),
+    ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0x2D6,
+     "8b8328b30000", "b80011000090"),
+    ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0x2FA,
+     "448ba304b30000", "41bc0000200290"),
+]
+AVC_DECODE_SITES = [
+    # Allow portrait AVC while retaining the native Level-5.2 pixel budget.
+    # A 4096x4096 Level-6 stream returns blank frames with this firmware, so
+    # the generic Linux maximum rectangle must not override the pixel check.
+    ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0xA7,
+     "448bbb14b30000", "41bf0010000090"),
+]
+REQUIRED_SITES = 14 + len(HEVC_ENCODE_SITES) + len(HEVC_DECODE_SITES) + len(AVC_DECODE_SITES)
 
 
 def arrays():
@@ -145,13 +165,13 @@ def collect(cache_dir, build, dump_pages=None, kernel=Path("/System/Library/Kern
             if len(candidates) != 1:
                 raise ValueError(f"{symbol}: expected one guarded site, found {len(candidates)}")
             sites.append((function + candidates[0], find, replace, symbol))
-        for symbol, offset, find_hex, replace_hex in HEVC_ENCODE_SITES:
+        for symbol, offset, find_hex, replace_hex in HEVC_ENCODE_SITES + HEVC_DECODE_SITES + AVC_DECODE_SITES:
             function = va.symbol(symbol)
             find, replace = bytes.fromhex(find_hex), bytes.fromhex(replace_hex)
             address = function + offset
             if (len(find) != len(replace) or address + len(find) > va.function_end(function) or
                     cache.read(address, len(find)) not in (find, replace)):
-                raise ValueError(f"{symbol}+{offset:#x}: reviewed HEVC encode window differs")
+                raise ValueError(f"{symbol}+{offset:#x}: reviewed HEVC window differs")
             sites.append((address, find, replace, symbol))
         # AppleGVA has stripped local symbols. Require exactly one guarded
         # selection branch inside its bounded __text section.

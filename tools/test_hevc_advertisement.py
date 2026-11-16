@@ -75,6 +75,7 @@ void put(OSDictionary* dictionary, const char* key, OSObject* value) {
 }
 int main() {
     assert(!enableHEVC10Encode(nullptr));
+    assert(!enableHEVC8KDecode(nullptr));
     unsigned checks = 0;
     for (int failAllocation = -1; failAllocation < 6; ++failAllocation) {
         for (int failInsertion = -1; failInsertion < 7; ++failInsertion) {
@@ -114,6 +115,43 @@ int main() {
             ++checks;
         }
     }
+    for (bool mainOnly : {false, true}) {
+        for (int failAllocation = -1; failAllocation < 7; ++failAllocation) {
+            for (int failInsertion = -1; failInsertion < 9; ++failInsertion) {
+                allocation = insertion = -1;
+                auto* personality = new OSDictionary;
+                auto* caps = new OSDictionary;
+                auto* details = new OSDictionary;
+                for (const auto* key : {"1", "2", "3"}) {
+                    if (mainOnly && std::string(key) != "1") continue;
+                    auto* entry = new OSDictionary;
+                    put(entry, "VTMaxDecodeLevel", OSNumber::withNumber(153, 32));
+                    put(details, key, entry);
+                }
+                put(caps, "VTPerProfileDetails", details);
+                caps->retain();
+                put(personality, "IOGVAHEVCDecodeCapabilities", caps);
+                allocation = failAllocation; insertion = failInsertion;
+                bool result = enableHEVC8KDecode(personality);
+                auto* updated = OSDynamicCast(OSDictionary, personality->getObject("IOGVAHEVCDecodeCapabilities"));
+                auto* newDetails = OSDynamicCast(OSDictionary, updated->getObject("VTPerProfileDetails"));
+                assert(result || updated == caps);
+                for (const auto* key : {"1", "2", "3"}) {
+                    auto* oldEntry = OSDynamicCast(OSDictionary, details->getObject(key));
+                    auto* newEntry = OSDynamicCast(OSDictionary, newDetails->getObject(key));
+                    assert((oldEntry == nullptr) == (newEntry == nullptr));
+                    if (oldEntry) {
+                        assert(OSDynamicCast(OSNumber, oldEntry->getObject("VTMaxDecodeLevel"))->value == 153);
+                        assert(OSDynamicCast(OSNumber, newEntry->getObject("VTMaxDecodeLevel"))->value ==
+                               (result ? 186 : 153));
+                    }
+                }
+                personality->release(); caps->release();
+                assert(live == 0);
+                ++checks;
+            }
+        }
+    }
     std::printf("PASS %u capability/ownership/failure cases; no GPU work\n", checks);
 }
 """
@@ -121,7 +159,8 @@ int main() {
 
 def main():
     source = (ROOT / "NootedRed/DriverInjector.cpp").read_text()
-    helper = function(source, "static bool enableHEVC10Encode(")
+    helper = (function(source, "static bool enableHEVC10Encode(") +
+              function(source, "static bool enableHEVC8KDecode("))
     with tempfile.TemporaryDirectory(prefix="nred-hevc-capabilities-") as directory:
         unit, binary = Path(directory) / "test.cpp", Path(directory) / "test"
         unit.write_text(STUBS + helper + TESTS)

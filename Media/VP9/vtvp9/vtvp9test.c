@@ -314,8 +314,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // Level 6.2 covers the 8K diagnostic clips (including 8192x4352).
+  uint8_t level = (ff.w > 4096 || ff.h > 2304) ? 62 : 51;
   uint8_t vpcC[12] = {
-      1, 0, 0, 0, (uint8_t)ff.profile, 51, (uint8_t)(ff.depth << 4 | 1 << 1), 1,
+      1, 0, 0, 0, (uint8_t)ff.profile, level, (uint8_t)(ff.depth << 4 | 1 << 1), 1,
       1, 1, 0, 0};
   CFDataRef vc = CFDataCreate(NULL, vpcC, sizeof(vpcC));
   const void *ak[] = {CFSTR("vpcC")}, *av[] = {vc};

@@ -67,6 +67,12 @@ bool VDA::isHEVC10EncodeAllowed() const
            NRed::singleton().getDeviceID() == 0x1636;
 }
 
+bool VDA::isHEVC8KDecodeAllowed() const
+{
+    return this->isHEVCDecodeAllowed() && this->canAdvertise() &&
+           NRed::singleton().getDeviceID() == 0x1636;
+}
+
 void VDA::stripCapabilities(OSDictionary* const dictionary)
 {
     if (dictionary == nullptr) { return; }

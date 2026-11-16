@@ -74,6 +74,37 @@ static bool enableHEVC10Encode(OSDictionary* const personality)
     return ready;
 }
 
+static bool enableHEVC8KDecode(OSDictionary* const personality)
+{
+    if (personality == nullptr) { return false; }
+    auto* const original = OSDynamicCast(OSDictionary, personality->getObject("IOGVAHEVCDecodeCapabilities"));
+    auto* const originalDetails = original != nullptr ?
+        OSDynamicCast(OSDictionary, original->getObject("VTPerProfileDetails")) : nullptr;
+    if (originalDetails == nullptr) { return false; }
+    auto* const caps = OSDictionary::withDictionary(original);
+    auto* const details = OSDictionary::withDictionary(originalDetails);
+    auto* const level = OSNumber::withNumber(static_cast<unsigned long long>(186), 32); // HEVC Level 6.2
+    bool ready = caps != nullptr && details != nullptr && level != nullptr;
+    const char* const profiles[] = {"1", "2", "3"};
+    for (const auto* profile : profiles) {
+        if (!ready) { break; }
+        auto* const old = OSDynamicCast(OSDictionary, originalDetails->getObject(profile));
+        if (old == nullptr) { continue; } // Preserve the Main-only boot policy.
+        auto* const updated = OSDictionary::withDictionary(old);
+        ready = updated != nullptr && updated->setObject("VTMaxDecodeLevel", level) &&
+                details->setObject(profile, updated);
+        if (updated != nullptr) { updated->release(); }
+    }
+    if (ready) {
+        ready = caps->setObject("VTPerProfileDetails", details) &&
+                personality->setObject("IOGVAHEVCDecodeCapabilities", caps);
+    }
+    if (level != nullptr) { level->release(); }
+    if (details != nullptr) { details->release(); }
+    if (caps != nullptr) { caps->release(); }
+    return ready;
+}
+
 static const char com_apple_kext_AMDRadeonX5000[] = {
 #include "Personalities/com.apple.kext.AMDRadeonX5000.inc"
 , '\0'
@@ -138,6 +169,7 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
             if (strcmp(driver.identifier, "com.apple.kext.AMDRadeonX5000") == 0) {
                 const auto count = driver.personalities->getCount();
                 NRed::singleton().setProp32("NRedHEVC10EncodeAdvertised", 0);
+                NRed::singleton().setProp32("NRedHEVC8KDecodeAdvertised", 0);
 
                 // Do not advertise the bridge on unsupported builds/devices or after a failure.
                 // Engine allocation is deliberately not required here: it occurs after injection.
@@ -155,7 +187,7 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
                     // - If !isHEVC10Allowed() (-NRedNoHEVC10): retain the existing Main-only policy.
                     //   It removes Main10 (profile 2) and Main Still Picture (profile 3);
                     //   profile 3 itself is 8-bit, not a second 10-bit profile.
-                    // - Default: preserve full native HEVC hardware decode (8-bit and 10-bit at Level 153).
+                    // - Default: Main/Main10; the reviewed Renoir manifest also enables Level 6.2.
                     if (!VDA::singleton().isHEVCDecodeAllowed()) {
                         for (UInt32 i = 0; i < count; ++i) {
                             auto* const pDict = OSDynamicCast(OSDictionary, driver.personalities->getObject(i));
@@ -202,6 +234,14 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
                     }
                     else {
                         DBGLOG("DriverInjector", "Full HEVC hardware decode (8-bit and 10-bit Main 10) enabled for %s", driver.identifier);
+                    }
+                    if (VDA::singleton().isHEVC8KDecodeAllowed()) {
+                        bool advertised = false;
+                        for (UInt32 i = 0; i < count; ++i) {
+                            advertised |= enableHEVC8KDecode(OSDynamicCast(OSDictionary, driver.personalities->getObject(i)));
+                        }
+                        advertised |= enableHEVC8KDecode(dict);
+                        NRed::singleton().setProp32("NRedHEVC8KDecodeAdvertised", advertised ? 1 : 0);
                     }
 
                     // 2. HEVC Encode policy:

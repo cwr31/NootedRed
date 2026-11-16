@@ -212,11 +212,11 @@ static int hook_create_session(uint8_t* proc, void* bi) {
   return r;
 }
 
-// Mesa's number for VP9 on VCN 2 and later: always 8K sized, 9 pictures, half
-// as much again at 10 bit. Being fixed, it never has to be reallocated when the
-// stream changes size, which would lose the references.
+// VCN2 tier-0 firmware uses a fixed 8K reference store for nine pictures.
+// Keep its 10-bit multiplier and avoid reallocating on resolution changes.
+// The coded-frame pixel guard matches this capacity, even when height is 4352.
 static uint32_t hook_dpb_size(uint8_t* proc) {
-  uint32_t size = 8192 * 4320 * 3 / 2 * 9;
+  uint32_t size = VCN_VP9_MAX_PIXELS * 3 / 2 * NUM_DPB;
   if (PROC_DEPTH(proc) == 10) size = size * 3 / 2;
   return size;
 }
@@ -551,6 +551,12 @@ static CVPixelBufferRef new_target(VcnVP9* d, uint32_t w, uint32_t h,
 
 VcnVP9* vcnvp9_create(uint32_t maxWidth, uint32_t maxHeight, char* err,
                       size_t errLen) {
+  if (!vcnvp9_bounds_supported(maxWidth, maxHeight)) {
+    if (err && errLen)
+      snprintf(err, errLen, "invalid VP9 session maximum %ux%u", maxWidth,
+               maxHeight);
+    return NULL;
+  }
 #define FAIL(...)                                          \
   do {                                                     \
     if (err && errLen) snprintf(err, errLen, __VA_ARGS__); \
@@ -763,7 +769,8 @@ static int on_frame(void* vctx, VP9Parser* p, VP9ParseResult kind,
         snprintf(d->err, sizeof(d->err), "missing reference");
         return -1;
       }
-  if (h->width > d->maxW || h->height > d->maxH) {
+  if (!vcnvp9_dimensions_supported(h->width, h->height) ||
+      h->width > d->maxW || h->height > d->maxH) {
     snprintf(d->err, sizeof(d->err), "%ux%u is over the session maximum",
              h->width, h->height);
     return -1;

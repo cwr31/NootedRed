@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "vp9parse.h"
+#include "vp9limits.h"
 
 typedef struct VcnVP9 VcnVP9;
 typedef void (*VcnVP9OutputFn)(void* ctx, CVPixelBufferRef pb,
