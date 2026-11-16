@@ -11,6 +11,9 @@
 #define VCN_MESSAGE_DRM 3u
 #define VCN_MESSAGE_VP9 0xEu
 #define VCN_MESSAGE_0F 15u  // the driver always sends this one zeroed
+#define VCN_MESSAGE_DYNAMIC_DPB 16u
+#define VCN_DECODE_USE_DYNAMIC_DPB 0x1u
+#define VCN_DECODE_USE_PAL 0x8u
 
 #define VP9_HDR_FRAME_TYPE (1u << 1)
 #define VP9_HDR_ERROR_RES (1u << 2)
@@ -26,6 +29,19 @@
 #define VP9_HDR_LF_DELTA_UPDATE (1u << 12)
 #define VP9_HDR_USE_PREV_MVS (1u << 13)
 #define VP9_HDR_USE_UNCOMPRESSED (1u << 14)
+
+// VCN1/2 VP9 tier-1 reference-array descriptor, matching
+// rvcn_dec_message_dynamic_dpb_t. Ten-bit internal reference storage uses
+// 3/2 the eight-bit byte sizes, independently of the P010 output surface.
+typedef struct {
+  uint32_t flags;
+  uint32_t luma_pitch, luma_height, luma_size;
+  uint32_t chroma_pitch, chroma_height, chroma_size;
+  uint8_t array_size, current_slice, ref_slices[16], reserved[2];
+  uint32_t current_offset, offsets[16];
+} VcnMsgDynamicDPB;
+
+_Static_assert(sizeof(VcnMsgDynamicDPB) == 116, "tier-1 DPB wire layout");
 
 typedef struct {
   uint32_t frame_header_flags;

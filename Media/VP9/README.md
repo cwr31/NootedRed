@@ -22,13 +22,15 @@ also requires the validated AMDRadeonVADriver2 UUID
 `1181E2CA-31B3-3DF0-90E2-3AE70552D753`. A different driver is rejected.
 
 Profiles 0 and 2, 4:2:0, 8/10-bit, are accepted up to 8192 pixels wide,
-4352 pixels high, and **35,389,440 pixels per frame**. These limits apply
-together: 8192x4320 and 7680x4352 fit; 8192x4352 is rejected. The latter
-produced incorrect inter-frame chroma in the current tier-0 driver/firmware
-path even with a larger DPB. See the [capability audit](../../analysis/media-capability-20261116.md).
-VCN 2 requires a large fixed DPB (about 456 MiB); this is separate from the GL
-resource-list budget correction. Do not reduce that buffer as a performance
-shortcut.
+4352 pixels high, and **35,651,584 pixels per frame**, including 8192x4352.
+Renoir uses a VCN tier-1 dynamic-DPB descriptor to give the firmware explicit
+reference-plane pitches, heights and sizes. Increasing the allocation alone
+left inter-frame chroma wrong in the implicit tier-0 path. The fixed nine-picture
+store uses 459 MiB for eight-bit references or 688.5 MiB for ten-bit references,
+and does not reallocate when coded resolution changes.
+See the [capability audit](../../analysis/media-capability-20261116.md).
+This DPB is separate from the GL resource-list budget correction. Navi retains
+the preceding tier-0 pixel guard because this new layout is tested on Renoir.
 
 The parser also excludes a preceding keyframe from motion-vector reuse, as
 libvpx does. A keyframe's `intra_only` syntax bit alone cannot express this.
@@ -93,16 +95,20 @@ On November 16, 2026, process-local hardware tests on Renoir / 25G332 passed:
 | Sample | Frames | Comparison |
 | --- | ---: | --- |
 | 640x360, profile 0 | 30 | CPU-decoded frame hashes, all equal |
-| 1920x1080, profile 0 | 30 | CPU-decoded frame hashes, all equal |
+| 1920x1080, profile 0, two loops | 60 | CPU-decoded frame hashes, all equal |
 | 3840x2160, profile 0 | 30 | CPU-decoded frame hashes, all equal |
 | FFmpeg FATE `vp92-2-20-10bit-yuv420.webm`, profile 2 | 10 | FATE frame hashes, all equal |
 | 3840x2160, profile 2, real ten-bit source | 3 | CPU-decoded frame hashes, all equal |
 | 7680x4320, profiles 0 and 2 | 30 each | CPU-decoded frame hashes, all equal |
 | 8192x4320 and 7680x4352, profile 0 | 3 each | CPU-decoded frame hashes, all equal |
+| 8192x4352, profile 0, two loops | 60 | CPU-decoded frame hashes, all equal |
+| 8192x4352, profile 2, real ten-bit source | 30 | CPU-decoded frame hashes, all equal |
+| One session: 640x360 → 1920x1080 → 3840x2160 → 640x360 | 120 | CPU-decoded frame hashes, all equal |
 
-The final plugin also rejects both 8-bit and 10-bit 8192x4352 format
-descriptions before creating a VCN session. This is a known remaining boundary,
-not full coverage of every rectangle advertised by a generic hardware table.
+The final production bundle passed these 11 regression cases (379 frames,
+excluding the earlier separate 640x360 test), with no mismatches or errors.
+The host message test checks both DPB tiers, both bit depths, allocation bounds,
+and rejection of invalid dimensions before submission.
 
 The VCN decode submission/completion counters increased, with no GPU recovery.
 Paced 1080p60 and 4K60 tests decoded 300 frames each without errors, but 4K60

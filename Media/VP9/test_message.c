@@ -101,53 +101,86 @@ int main(void) {
   VP9Params params = {.vp9 = &parser, .mif_wrc_en = 0};
   const uint32_t dimensions[][2] = {
       {64, 64}, {1920, 1080}, {1918, 1080}, {3840, 2160},
-      {4096, 2304}, {7680, 4320}, {8192, 4320}, {7680, 4352}};
+      {4096, 2304}, {7680, 4320}, {8192, 4320}, {7680, 4352},
+      {8192, 4352}};
   unsigned checks = test_previous_mvs();
   for (unsigned i = 0; i < sizeof(dimensions) / sizeof(dimensions[0]); i++) {
     uint32_t width = dimensions[i][0], height = dimensions[i][1];
     assert(vcnvp9_dimensions_supported(width, height));
-    for (uint32_t depth = 8; depth <= 10; depth += 2) {
-      uint32_t bpe = depth == 10 ? 2 : 1;
-      uint32_t pitch = al(width * bpe, 256), texh = al(height, 64);
-      memset(message, 0xA5, sizeof(message));
-      memset(segments, 0xA5, sizeof(segments));
-      DATA_DPB_SIZE(data) = DATA_CTX_SIZE(data) = 0;
-      DEC_WIDTH(dec) = parser.fh.width = width;
-      DEC_HEIGHT(dec) = parser.fh.height = height;
-      parser.fh.bit_depth = depth;
-      parser.fh.profile = depth == 10 ? 2 : 0;
-      TEX_HEIGHT(texture) = texh;
-      TEX_PITCH(texture) = pitch;
-      TEX_BPE(texture) = bpe;
-      assert(hook_set_message(proc, &params, texture, bindings, 0, 0) == 0);
-      uint8_t *m = message + 88;
-      assert(U32(m, 0) == VCN_CODEC_VP9);
-      assert(U32(m, 8) == width && U32(m, 12) == height);
-      assert(U32(m, 24) == pitch * texh * 3 / 2);
-      assert(U32(m, 72) == al(width, 64) && U32(m, 76) == texh);
-      assert(U32(m, 100) == pitch / bpe);
-      assert(U32(m, 104) == pitch / bpe / 2);
-      assert(U32(m, 140) < U32(m, 24));
-      assert(U32(m, 148) < U32(m, 24));
-      assert(U32(m, 160) == 0); // Renoir must not receive the VCN3 flag.
-      VcnMsgVP9 *vp9 = (VcnMsgVP9 *)(message + 276);
-      assert(vp9->bit_depth_luma_minus8 == depth - 8);
-      assert(vp9->p010_mode == (depth == 10));
-      assert(vp9->msb_mode == (depth == 10));
-      assert(DATA_DPB_SIZE(data) == hook_dpb_size(proc));
-      assert(DATA_CTX_SIZE(data) == hook_ctx_size(proc));
-      uint32_t end = U32(message, 4);
-      assert(end < sizeof(message));
-      for (unsigned at = end; at < sizeof(message); at++)
-        assert(message[at] == 0xA5);
-      for (unsigned at = VCN_VP9_PROBS_DATA_SIZE + 256;
-           at < sizeof(segments); at++)
-        assert(segments[at] == 0xA5);
-      checks++;
+    for (unsigned tier = 0; tier <= 1; tier++) {
+      if (!tier && (uint64_t)width * height > VCN_VP9_TIER0_MAX_PIXELS)
+        continue;
+      params.dpb_tier = tier;
+      for (uint32_t depth = 8; depth <= 10; depth += 2) {
+        uint32_t bpe = depth == 10 ? 2 : 1;
+        uint32_t pitch = al(width * bpe, 256), texh = al(height, 64);
+        memset(message, 0xA5, sizeof(message));
+        memset(segments, 0xA5, sizeof(segments));
+        DATA_DPB_SIZE(data) = DATA_CTX_SIZE(data) = 0;
+        DEC_WIDTH(dec) = parser.fh.width = width;
+        DEC_HEIGHT(dec) = parser.fh.height = height;
+        parser.fh.bit_depth = depth;
+        parser.fh.profile = depth == 10 ? 2 : 0;
+        TEX_HEIGHT(texture) = texh;
+        TEX_PITCH(texture) = pitch;
+        TEX_BPE(texture) = bpe;
+        assert(hook_set_message(proc, &params, texture, bindings, 0, 0) == 0);
+        assert(U32(message, 8) == (tier ? 5 : 4));
+        uint32_t decode_offset = tier ? 104 : 88;
+        assert(U32(message, 28) == decode_offset);
+        uint8_t *m = message + decode_offset;
+        assert(U32(m, 0) == VCN_CODEC_VP9);
+        assert(U32(m, 4) == (tier ?
+            (VCN_DECODE_USE_DYNAMIC_DPB | VCN_DECODE_USE_PAL) : 0));
+        assert(U32(m, 8) == width && U32(m, 12) == height);
+        assert(U32(m, 24) == pitch * texh * 3 / 2);
+        assert(U32(m, 72) == al(width, 64) && U32(m, 76) == texh);
+        assert(U32(m, 100) == pitch / bpe);
+        assert(U32(m, 104) == pitch / bpe / 2);
+        assert(U32(m, 140) < U32(m, 24));
+        assert(U32(m, 148) < U32(m, 24));
+        assert(U32(m, 160) == 0); // Renoir must not receive the VCN3 flag.
+        VcnMsgVP9 *vp9 = (VcnMsgVP9 *)(m + 188);
+        assert(vp9->bit_depth_luma_minus8 == depth - 8);
+        assert(vp9->p010_mode == (depth == 10));
+        assert(vp9->msb_mode == (depth == 10));
+        assert(DATA_DPB_SIZE(data) == hook_dpb_size(proc));
+        assert(DATA_CTX_SIZE(data) == hook_ctx_size(proc));
+        if (tier) {
+          assert(U32(message, 88) == VCN_MESSAGE_DYNAMIC_DPB);
+          assert(U32(message, 96) == sizeof(VcnMsgDynamicDPB));
+          VcnMsgDynamicDPB *dynamic =
+              (VcnMsgDynamicDPB *)(message + U32(message, 92));
+          assert(dynamic->array_size == NUM_DPB);
+          assert(dynamic->luma_pitch == VCN_VP9_MAX_WIDTH);
+          assert(dynamic->luma_height == VCN_VP9_MAX_HEIGHT);
+          assert(dynamic->chroma_pitch == dynamic->luma_pitch / 2);
+          assert(dynamic->chroma_height == dynamic->luma_height / 2);
+          uint32_t luma = VCN_VP9_MAX_PIXELS;
+          uint32_t chroma = luma / 2;
+          if (depth == 10) { luma = luma * 3 / 2; chroma = chroma * 3 / 2; }
+          assert(dynamic->luma_size == luma && dynamic->chroma_size == chroma);
+          assert((dynamic->luma_size + dynamic->chroma_size) *
+                 dynamic->array_size == DATA_DPB_SIZE(data));
+          assert(dynamic->reserved[0] == 64);
+          assert(dynamic->flags == 0 && dynamic->current_offset == 0);
+          assert(dynamic->current_slice == 0 && dynamic->reserved[1] == 0);
+          for (unsigned at = 0; at < 16; at++)
+            assert(dynamic->offsets[at] == 0 && dynamic->ref_slices[at] == 0);
+        }
+        uint32_t end = U32(message, 4);
+        assert(end < sizeof(message));
+        for (unsigned at = end; at < sizeof(message); at++)
+          assert(message[at] == 0xA5);
+        for (unsigned at = VCN_VP9_PROBS_DATA_SIZE + 256;
+             at < sizeof(segments); at++)
+          assert(segments[at] == 0xA5);
+        checks++;
+      }
     }
   }
   const uint32_t invalid[][2] = {
-      {0, 1080}, {1920, 0}, {8193, 4352}, {8192, 4353}, {8192, 4352},
+      {0, 1080}, {1920, 0}, {8193, 4352}, {8192, 4353},
       {UINT32_MAX, 1080}, {1920, UINT32_MAX}};
   for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
     char error[128] = "";
@@ -167,6 +200,15 @@ int main(void) {
     }
     checks++;
   }
+  // The new descriptor is enabled only on the tested Renoir device. Preserve
+  // the tier-0 guard for Navi without allocating or submitting GPU work.
+  VcnVP9 navi = {.maxW = VCN_VP9_MAX_WIDTH, .maxH = VCN_VP9_MAX_HEIGHT,
+                 .deviceID = 0x73BF};
+  parser.fh = (VP9Frame){.width = 8192, .height = 4352, .profile = 0,
+                         .bit_depth = 8, .subsampling_x = 1, .subsampling_y = 1};
+  assert(on_frame(&navi, &parser, VP9_PARSE_DECODE, NULL, 0) == -1);
+  assert(strstr(navi.err, "over the session maximum"));
+  checks++;
   printf("PASS %u VP9 dimensions/actual message/buffer-bound checks; no GPU work\n", checks);
   return 0;
 }

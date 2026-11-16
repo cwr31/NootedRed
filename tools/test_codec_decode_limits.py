@@ -9,7 +9,7 @@ import mmap
 import struct
 
 from gen_vda_va_data import DEFAULT_CACHE_DIR, DyldCache, MachOImage, VA_IMAGE_PATH
-from media_patch_manifest import HEVC_DECODE_SITES, AVC_DECODE_SITES
+from media_patch_manifest import HEVC_DECODE_SITES, AVC_DECODE_SITES, AVC_ENCODE_SITES
 
 
 def main():
@@ -21,7 +21,7 @@ def main():
     assert original[0x11] == 0xE8
     original[0x11:0x16] = bytes.fromhex("31c0909090")
     patched = bytearray(original)
-    for _, offset, find, replace in HEVC_DECODE_SITES + AVC_DECODE_SITES:
+    for _, offset, find, replace in HEVC_DECODE_SITES + AVC_DECODE_SITES + AVC_ENCODE_SITES:
         find, replace = bytes.fromhex(find), bytes.fromhex(replace)
         assert original[offset:offset + len(find)] in (find, replace)
         original[offset:offset + len(find)] = find
@@ -32,6 +32,7 @@ def main():
         0xB300: 4096 * 2304, 0xB304: 8192 * 4320,
         0xB308: 64, 0xB30C: 64, 0xB310: 4096, 0xB314: 2304,
         0xB318: 64, 0xB31C: 64, 0xB320: 4096, 0xB324: 8192, 0xB328: 4320,
+        0xB350: 4096, 0xB354: 2304, 0xB358: 4096, 0xB35C: 2304,
         0xB374: 0x3C5E6,
     }.items():
         struct.pack_into("<I", capability, offset, value)
@@ -84,9 +85,31 @@ def main():
                             hex(codec), internal, width, height, mode, changed, actual)
                         assert before == (bytes(cap), bytes(info), bytes(context))
                         checks += 1
+    # AVC's independent encode-height field can grow without enabling the
+    # separate, unvalidated HEVC encode-height path or bypassing count/profile
+    # checks. Decode's conservative pixel budget remains unchanged.
+    for codec in (0x20, 0x1000):
+        for width, height in ((1920, 1080), (4096, 2304), (2304, 4096),
+                              (4096, 4096), (4097, 2304), (4096, 4097)):
+            for mode in (4, 5):
+                for count in (0, 1):
+                    struct.pack_into("<I", info, 0, 0x20)
+                    struct.pack_into("<Q", info, 8, codec)
+                    struct.pack_into("<I", info, 0x10, mode)
+                    struct.pack_into("<III", info, 0x18, count, 0, width)
+                    struct.pack_into("<I", info, 0x24, height)
+                    for function, changed in ((old, False), (new, True)):
+                        maximum = 4096 if changed and codec == 0x20 else 2304
+                        supported = mode == 4 and count == 1 and width <= 4096 and height <= maximum
+                        before = bytes(cap), bytes(info), bytes(context)
+                        actual = function(ctypes.addressof(cap), ctypes.addressof(context))
+                        assert (actual == 0) == supported, (
+                            "encode", hex(codec), width, height, mode, count, changed, actual)
+                        assert before == (bytes(cap), bytes(info), bytes(context))
+                        checks += 1
     old_region.close()
     new_region.close()
-    print(f"PASS {checks} actual AVC/HEVC driver boundary/profile checks; no GPU work")
+    print(f"PASS {checks} actual AVC/HEVC decode/encode boundary/profile checks; no GPU work")
 
 
 if __name__ == "__main__":

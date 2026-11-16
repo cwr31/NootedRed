@@ -89,7 +89,41 @@ AVC_DECODE_SITES = [
     ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0xA7,
      "448bbb14b30000", "41bf0010000090"),
 ]
-REQUIRED_SITES = 14 + len(HEVC_ENCODE_SITES) + len(HEVC_DECODE_SITES) + len(AVC_DECODE_SITES)
+AVC_ENCODE_SITES = [
+    # The AVC encoder height table retains 2304 despite working 4096x4096
+    # Baseline/Main/High output. Preserve its width/profile checks. HEVC's
+    # separate +0xB35C height field is deliberately not changed.
+    ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0x14D,
+     "448b9b54b30000", "41bb0010000090"),
+]
+# Apple's NumberOfSlices branch logs "unsupported" and returns success, although
+# glob+0x10E68 already feeds the native encoder's SetParameter(8) during init.
+# These two windows belong to the same UUID-pinned SetProperty function.
+# Convert into its existing stack scratch first; failed conversions leave the
+# configuration untouched. Save the count only before the first frame. The
+# native init path validates/clamps it against macroblock rows and 256 entries
+# before building matching slice headers. Once encoder+0x38 is set, return the
+# existing -12915 error without mutating the session: this VCN path does not
+# apply runtime changes even if its native setter reports success. A missing
+# lazy encoder (glob+0x50 -> wrapper+0x3A8) can still save the initial request.
+# Never write the driver's final +0x308 count and bypass native validation.
+#
+# The continuation occupies the adjacent MaxKeyFrameIntervalDuration diagnostic
+# window. That property's conversion, value store, update flag, and return
+# status are preserved; only its optional debug log is omitted.
+GVA_ENCODE_SITES = [
+    ("AVFQTXENC_SetProperty::NumberOfSlices", 0x7FFA0C5D6B39,
+     "4180be82160100010f855c0e0000488d35c9080800e9ed060000",
+     "488d5dc86a035e4c89ff535ae8b6b1060084c0eb46e99dfbffff"),
+    ("AVFQTXENC_SetProperty::SliceContinuation", 0x7FFA0C5D6B75,
+     "498d9ed8050100be060000004c89ff4889dae874b106004180be82160100017517"
+     "f20f1003488d35ea060800bf1b000000b001e8bdb6060041c6862a18010001e9e90d0000",
+     "498d96d80501006a065e4c89ffe879b1060041c6862a18010001e90f0e000074b8"
+     "498b4650488b80a80300004885c074068378380075a28b03418986680e0100e9e90d0000"),
+]
+REQUIRED_SITES = (14 + len(HEVC_ENCODE_SITES) + len(HEVC_DECODE_SITES) +
+                  len(AVC_DECODE_SITES) + len(AVC_ENCODE_SITES) +
+                  len(GVA_ENCODE_SITES))
 
 
 def arrays():
@@ -165,13 +199,15 @@ def collect(cache_dir, build, dump_pages=None, kernel=Path("/System/Library/Kern
             if len(candidates) != 1:
                 raise ValueError(f"{symbol}: expected one guarded site, found {len(candidates)}")
             sites.append((function + candidates[0], find, replace, symbol))
-        for symbol, offset, find_hex, replace_hex in HEVC_ENCODE_SITES + HEVC_DECODE_SITES + AVC_DECODE_SITES:
+        for symbol, offset, find_hex, replace_hex in (
+                HEVC_ENCODE_SITES + HEVC_DECODE_SITES +
+                AVC_DECODE_SITES + AVC_ENCODE_SITES):
             function = va.symbol(symbol)
             find, replace = bytes.fromhex(find_hex), bytes.fromhex(replace_hex)
             address = function + offset
             if (len(find) != len(replace) or address + len(find) > va.function_end(function) or
                     cache.read(address, len(find)) not in (find, replace)):
-                raise ValueError(f"{symbol}+{offset:#x}: reviewed HEVC window differs")
+                raise ValueError(f"{symbol}+{offset:#x}: reviewed VA window differs")
             sites.append((address, find, replace, symbol))
         # AppleGVA has stripped local symbols. Require exactly one guarded
         # selection branch inside its bounded __text section.
@@ -182,6 +218,13 @@ def collect(cache_dir, build, dump_pages=None, kernel=Path("/System/Library/Kern
         if len(candidates) != 1:
             raise ValueError(f"AppleGVA: expected one guarded branch, found {len(candidates)}")
         sites.append((gva.text[2] + candidates[0], find, replace, "AVDGetGPUAccelerators"))
+        for symbol, address, find_hex, replace_hex in GVA_ENCODE_SITES:
+            find, replace = bytes.fromhex(find_hex), bytes.fromhex(replace_hex)
+            if (len(find) != len(replace) or address < gva.text[2] or
+                    address + len(find) > gva.text[2] + gva.text[3] or
+                    cache.read(address, len(find)) not in (find, replace)):
+                raise ValueError(f"{symbol}: reviewed AppleGVA window differs")
+            sites.append((address, find, replace, symbol))
         pages = {}
         for address, find, replace, symbol in sites:
             page_address = address & ~4095

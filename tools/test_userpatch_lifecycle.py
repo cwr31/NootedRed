@@ -230,7 +230,14 @@ UserPatches media() {
     UserPatches p; p.vdaEnabled = true; p.nativeBackendReady = true; p.kernelIdentityMatches = true; return p;
 }
 MediaPatchPlan::Page fixturePlan(Page& original) {
-    auto plan = MediaPatchManifest::Pages[2]; // three mutually required sites
+    size_t index = 0;
+    while (index < arrsize(MediaPatchManifest::Pages) &&
+           MediaPatchManifest::Pages[index].siteCount < 3) ++index;
+    if (index == arrsize(MediaPatchManifest::Pages)) {
+        check(false, "manifest provides a multi-site guard fixture");
+        std::abort();
+    }
+    auto plan = MediaPatchManifest::Pages[index];
     for (size_t i = 0; i < plan.siteCount; ++i) {
         const auto& site = plan.sites[i];
         std::memcpy(original.data() + site.offset, site.find, site.size);

@@ -50,7 +50,8 @@ typedef struct {
   void* bsinfo;               // +96  driver reads +0 buffer index, +16 size
   const VP9Parser* vp9;       // +104 ours
   uint32_t mif_wrc_en;        // +112 ours: VCN3+, zero on Renoir's VCN2
-  uint8_t reserved[148];
+  uint32_t dpb_tier;          // +116 ours: explicit tier 1 on checked Renoir
+  uint8_t reserved[144];
 } VP9Params;
 
 typedef struct {
@@ -212,9 +213,10 @@ static int hook_create_session(uint8_t* proc, void* bi) {
   return r;
 }
 
-// VCN2 tier-0 firmware uses a fixed 8K reference store for nine pictures.
-// Keep its 10-bit multiplier and avoid reallocating on resolution changes.
-// The coded-frame pixel guard matches this capacity, even when height is 4352.
+// Reserve the full 8K rectangle for nine pictures, including aligned height.
+// Renoir describes each reference plane with the tier-1 message below; simply
+// growing this allocation without that descriptor does not fix tier-0 chroma.
+// Its fixed layout preserves references across coded-resolution changes.
 static uint32_t hook_dpb_size(uint8_t* proc) {
   uint32_t size = VCN_VP9_MAX_PIXELS * 3 / 2 * NUM_DPB;
   if (PROC_DEPTH(proc) == 10) size = size * 3 / 2;
@@ -333,6 +335,22 @@ static void fill_segments(uint8_t* it, const VP9Parser* p) {
   s->abs_delta = (uint8_t)p->seg_abs_delta;
 }
 
+static void fill_dynamic_dpb(VcnMsgDynamicDPB* m, bool ten_bit) {
+  memset(m, 0, sizeof(*m));
+  m->array_size = NUM_DPB;
+  m->luma_pitch = VCN_VP9_MAX_WIDTH;
+  m->luma_height = VCN_VP9_MAX_HEIGHT;
+  m->luma_size = m->luma_pitch * m->luma_height;
+  m->chroma_pitch = m->luma_pitch / 2;
+  m->chroma_height = m->luma_height / 2;
+  m->chroma_size = m->chroma_pitch * m->chroma_height * 2;
+  m->reserved[0] = dpb_alignment(VCN_VP9_MAX_WIDTH);
+  if (ten_bit) {
+    m->luma_size = m->luma_size * 3 / 2;
+    m->chroma_size = m->chroma_size * 3 / 2;
+  }
+}
+
 // Replaces AvdVcnAv1DecDataProcessor::SetDecodeMessageFields. Same layout the
 // driver sends for AV1 (four index entries, the decode message filled the same
 // way) with VP9's codec message in AV1's place.
@@ -360,23 +378,28 @@ static int hook_set_message(uint8_t* proc, const VP9Params* prm,
     memcpy(DATA_TUPLE(data), tuple, sizeof(tuple));
   }
   uint8_t* msg = DATA_MSG(data);
-  const uint32_t decode_off = 88, codec_off = decode_off + 188,
+  const bool tier1 = prm->dpb_tier == 1;
+  const uint32_t count = tier1 ? 5 : 4;
+  const uint32_t decode_off = 24 + count * 16, codec_off = decode_off + 188,
                  codec_size = sizeof(VcnMsgVP9);
   const uint32_t drm_off = codec_off + al(codec_size, 4),
-                 zero_off = drm_off + 68, end = zero_off + 168;
+                 zero_off = drm_off + 68, dynamic_off = zero_off + 168,
+                 end = dynamic_off + (tier1 ? sizeof(VcnMsgDynamicDPB) : 0);
   memset(msg, 0, end + 16);
   U32(msg, 0) = 40;
   U32(msg, 4) =
       end + 16;  // the driver's AV1 total also has these 16 extra bytes
-  U32(msg, 8) = 4;
+  U32(msg, 8) = count;
   U32(msg, 12) = 1;
   U32(msg, 16) = (uint32_t)(uintptr_t)data;
   U32(msg, 20) = PROC_FEEDBACK(proc);
-  const uint32_t index[4][3] = {{VCN_MESSAGE_DECODE, decode_off, 188},
+  const uint32_t index[5][3] = {{VCN_MESSAGE_DECODE, decode_off, 188},
                                 {VCN_MESSAGE_VP9, codec_off, codec_size},
                                 {VCN_MESSAGE_DRM, drm_off, 68},
-                                {VCN_MESSAGE_0F, zero_off, 168}};
-  for (int i = 0; i < 4; i++)
+                                {VCN_MESSAGE_0F, zero_off, 168},
+                                {VCN_MESSAGE_DYNAMIC_DPB, dynamic_off,
+                                 sizeof(VcnMsgDynamicDPB)}};
+  for (uint32_t i = 0; i < count; i++)
     for (int j = 0; j < 3; j++) U32(msg, 24 + 16 * i + 4 * j) = index[i][j];
 
   uint8_t* m = msg + decode_off;
@@ -401,6 +424,10 @@ static int hook_set_message(uint8_t* proc, const VP9Params* prm,
   // Renoir accepts the VP9 protocol but must keep this VCN3 flag clear.
   U32(m, 160) = prm->mif_wrc_en;
   U32(m, 164) = al(w / 2, a);
+  if (tier1) {
+    U32(m, 4) = VCN_DECODE_USE_DYNAMIC_DPB | VCN_DECODE_USE_PAL;
+    fill_dynamic_dpb((VcnMsgDynamicDPB*)(msg + dynamic_off), h->bit_depth > 8);
+  }
 
   // SetupVcnDRMCommand with no protected content.
   if (U32(hw, 144) & 0x80000)
@@ -770,6 +797,8 @@ static int on_frame(void* vctx, VP9Parser* p, VP9ParseResult kind,
         return -1;
       }
   if (!vcnvp9_dimensions_supported(h->width, h->height) ||
+      (d->deviceID != 0x1636 &&
+       (uint64_t)h->width * h->height > VCN_VP9_TIER0_MAX_PIXELS) ||
       h->width > d->maxW || h->height > d->maxH) {
     snprintf(d->err, sizeof(d->err), "%ux%u is over the session maximum",
              h->width, h->height);
@@ -815,6 +844,7 @@ static int on_frame(void* vctx, VP9Parser* p, VP9ParseResult kind,
   prm.bsinfo = d->bsinfo;
   prm.vp9 = p;
   prm.mif_wrc_en = d->mif_wrc_en;
+  prm.dpb_tier = d->deviceID == 0x1636 ? 1 : 0;
   for (int i = 0; i < 8; i++)
     prm.ref_frame_map[i] = p->ref[i].valid && p->ref[i].dpb_slot >= 0
                                ? (uint32_t)p->ref[i].dpb_slot

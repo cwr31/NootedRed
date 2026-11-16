@@ -32,6 +32,25 @@
       "masked_sha256": "7983734e765f718518c3f0df667e5344fd80300b5689ee724c4d14b2d341c179"
     },
     {
+      "file": "dyld_shared_cache_x86_64h.02",
+      "offset": "0xc5d6000",
+      "sites": [
+        {
+          "offset": 2873,
+          "find": "4180be82160100010f855c0e0000488d35c9080800e9ed060000",
+          "replace": "488d5dc86a035e4c89ff535ae8b6b1060084c0eb46e99dfbffff",
+          "symbol": "AVFQTXENC_SetProperty::NumberOfSlices"
+        },
+        {
+          "offset": 2933,
+          "find": "498d9ed8050100be060000004c89ff4889dae874b106004180be82160100017517f20f1003488d35ea060800bf1b000000b001e8bdb6060041c6862a18010001e9e90d0000",
+          "replace": "498d96d80501006a065e4c89ffe879b1060041c6862a18010001e90f0e000074b8498b4650488b80a80300004885c074068378380075a28b03418986680e0100e9e90d0000",
+          "symbol": "AVFQTXENC_SetProperty::SliceContinuation"
+        }
+      ],
+      "masked_sha256": "e476616ee947f52f0175d2b716d71807ff26af5680651738feb2f02b9787bc8e"
+    },
+    {
       "file": "dyld_shared_cache_x86_64h.03",
       "offset": "0x10b00000",
       "sites": [
@@ -214,6 +233,12 @@
           "symbol": "__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo"
         },
         {
+          "offset": 1147,
+          "find": "448b9b54b30000",
+          "replace": "41bb0010000090",
+          "symbol": "__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo"
+        },
+        {
           "offset": 1509,
           "find": "8b8320b30000",
           "replace": "8b8324b30000",
@@ -232,7 +257,7 @@
           "symbol": "__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo"
         }
       ],
-      "masked_sha256": "75c1b37a08fa3ff280a355e0c78689e77cf119b3dc04957b49fbd0c573c70f41"
+      "masked_sha256": "127e29c511a9e2e58c70ca084787f4f8dff530580740dced6208e7e2ed759cd3"
     }
   ]
 }

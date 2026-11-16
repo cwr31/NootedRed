@@ -439,8 +439,8 @@ auto UserPatches::installNativePagePatcher(KernelPatcher& patcher) -> bool
         patcher.clearError();
     }
 
-    NRed::singleton().setProp32("NRedUserPatchRevision", 5);
-    SYSLOG("UserPatch", "Installed per-page backend (revision 5, Main10 encode and expanded AVC/HEVC decode manifest, trace %s)",
+    NRed::singleton().setProp32("NRedUserPatchRevision", 6);
+    SYSLOG("UserPatch", "Installed per-page backend (revision 6, AVC encode height/slices and VP9 tier-1 pair, trace %s)",
            this->traceEnabled ? "first 128 writes" : "off");
     return true;
 }
