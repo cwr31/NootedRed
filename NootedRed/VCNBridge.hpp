@@ -64,6 +64,8 @@ class VCNBridge
     mach_vm_address_t orgSurfaceCopy{0};
     mach_vm_address_t orgInitHardware{0};
     mach_vm_address_t orgSafeMetaCast{0};
+    mach_vm_address_t orgFetchResource{0};
+    volatile UInt32  resourceFailures{0};
 
     mach_vm_address_t newVideo6000{0};
     mach_vm_address_t createSML6000{0};
@@ -115,5 +117,6 @@ private:
     static UInt64        surfaceCopy(void* self, void* input, UInt64 size, void* event);
     static void          signalWork(void* hardware);
     static bool          initHardware(void* self, UInt32 channel);
+    static bool          fetchResource(void* self, void* parameters, void* resourceInfo);
     static OSMetaClassBase* safeMetaCast(const OSMetaClassBase* object, const OSMetaClass* target);
 };

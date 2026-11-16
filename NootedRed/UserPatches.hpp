@@ -151,21 +151,15 @@ public:
     void processPatcher(KernelPatcher& patcher);
 
 private:
-    // Maximum amount of signature patches in a patch set.
-    static constexpr size_t kMaxSignatures    = 8;
-    static constexpr size_t kMaxVDASignatures = 16;
-
     const SignaturePatch* signatures{nullptr};
     size_t                signatureCount{0};
-    size_t                signatureApplied[kMaxSignatures]{};
     const SignaturePatch* vdaSignatures{nullptr};
     size_t                vdaSignatureCount{0};
-    size_t                vdaSignatureApplied[kMaxVDASignatures]{};
     const SignaturePatch* gvaSignature{nullptr};
-    size_t                gvaSignatureApplied{0};
-    bool                  mtlHwInfoApplied{false};
     bool                  resolverEnabled{false};
     bool                  resolverOnly{false};
+    bool                  traceEnabled{false};
+    volatile SInt32        traceCount{0};
 
     bool                  enabled{false};
     bool                  vdaEnabled{false};
@@ -179,6 +173,7 @@ private:
     mach_vm_address_t orgCsValidateRange{0};
 
     auto installNativePagePatcher(KernelPatcher& patcher) -> bool;
+    void tracePatch(const char* kind, size_t signatureIndex, UInt64 pageOffset, size_t matchOffset);
     void patchSignaturePage(const void* data, UInt64 pageOffset, void* vnode);
 
     static void      wrapCsValidatePage(void* vnode, void* pager, UInt64 pageOffset, const void* data, int* validated,

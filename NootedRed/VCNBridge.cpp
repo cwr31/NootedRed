@@ -38,6 +38,7 @@
 #endif
 #include <VDA.hpp>
 #include <X5000.hpp>
+#include <VideoCommandPatch.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <libkern/OSAtomic.h>
 #include <libkern/OSKextLib.h>
@@ -445,6 +446,21 @@ bool VCNBridge::initHardware(void* const self, const UInt32 channel)
     return false;
 }
 
+bool VCNBridge::fetchResource(void* const self, void* const parameters, void* const resourceInfo)
+{
+    auto& bridge = singleton();
+    const auto result = FunctionCast(fetchResource, bridge.orgFetchResource)(self, parameters, resourceInfo);
+    if (!result) {
+        const auto count = static_cast<UInt32>(OSIncrementAtomic(&bridge.resourceFailures) + 1);
+        // Publish only on a real preparation failure, with bounded registry/log work.
+        if (count <= 8) {
+            NRed::singleton().setProp32("NRedVCNResourceFailures", count);
+            SYSLOG("VCN", "Rejected video resource preparation failure %u", count);
+        }
+    }
+    return result;
+}
+
 OSMetaClassBase* VCNBridge::safeMetaCast(const OSMetaClassBase* const object, const OSMetaClass* const target)
 {
     auto& bridge = singleton();
@@ -586,6 +602,18 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
         }
         publishStage(8);
 
+        // The bridged video context belongs to X6000. Fixing only X5000's copy leaves VCN
+        // submitting a partial command stream after a resource lookup/preparation failure.
+        if (!VideoCommandPatch::install(
+                patcher, id, slide, size,
+                "__ZN35AMDRadeonX6000_AMDAccelVideoContext14processCommandEPj16VideoCommandTypeS0_j",
+                "__ZN35AMDRadeonX6000_AMDAccelVideoContext13fetchResourceEP22_AMDVideoResourceParamP21_AMDVideoResourceInfo",
+                "NRedVideoCommandGuard6000")) {
+            publishReject(13);
+            SYSLOG("VCN", "Cannot guard X6000 video resource failure; bridge disabled");
+            return;
+        }
+
         auto ok = true;
         ok &= resolve(patcher, id, "__ZN30AMDRadeonX6000_AMDVCN2HWEngine10gMetaClassE", this->engineMC, slide, size);
         ok &= resolve(patcher, id, "__ZN29AMDRadeonX6000_AMDAccelShared10gMetaClassE", this->sharedMC, slide, size);
@@ -686,6 +714,8 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
             {"__ZN29AMDRadeonX6000_AMDAccelShared11SurfaceCopyEPjyP12IOAccelEvent", surfaceCopy, this->orgSurfaceCopy},
             {"__ZN30AMDRadeonX6000_AMDVCN2HWEngine12initHardwareE21eAMDAccelVideoChannel", initHardware,
              this->orgInitHardware},
+            {"__ZN35AMDRadeonX6000_AMDAccelVideoContext13fetchResourceEP22_AMDVideoResourceParamP21_AMDVideoResourceInfo",
+             fetchResource, this->orgFetchResource},
         };
         if (!patcher.routeMultiple(id, routes, arrsize(routes), slide, size)) {
             patcher.clearError();
@@ -706,6 +736,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
 
         this->x6000Prepared = true;
         NRed::singleton().setProp32("NRedVCNX6000ABIValidated", 1);
+        NRed::singleton().setProp32("NRedVCNResourceFailures", 0);
         SYSLOG("VCN", "X6000 VCN bridge prepared (%zu call-site patches)", callPatchCount);
     }
 }
