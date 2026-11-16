@@ -61,6 +61,12 @@ bool VDA::canAdvertise() const
     return this->isSupported() && !VCNBridge::singleton().hasMediaFailed();
 }
 
+bool VDA::isHEVC10EncodeAllowed() const
+{
+    return this->isHEVC10Allowed() && this->canAdvertise() &&
+           NRed::singleton().getDeviceID() == 0x1636;
+}
+
 void VDA::stripCapabilities(OSDictionary* const dictionary)
 {
     if (dictionary == nullptr) { return; }
@@ -93,9 +99,9 @@ void VDA::init()
     }
     else {
         if (this->hevc10Allowed) {
-            DBGLOG("VDA", "Hardware video acceleration enabled: AVC + HEVC (8/10-bit decode, 8-bit encode)");
+            DBGLOG("VDA", "Hardware video acceleration requested: AVC + HEVC; Main10 encode requires validated Renoir patches");
         } else {
-            DBGLOG("VDA", "-NRedNoHEVC10 active: 10-bit HEVC decode disabled");
+            DBGLOG("VDA", "-NRedNoHEVC10 active: 10-bit HEVC encode/decode disabled");
         }
     }
 }

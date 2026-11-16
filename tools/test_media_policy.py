@@ -58,9 +58,11 @@ struct X5000 {
 };
 struct NRed {
     bool external = false;
+    unsigned device = 0x1636;
     std::map<std::string, UInt32> properties;
     static NRed& singleton() { static NRed n; return n; }
     bool hasExternalVideo() const { return external; }
+    unsigned getDeviceID() const { return device; }
     void setProp32(const char* key, UInt32 value) { properties[key] = value; }
 };
 struct UserPatches {
@@ -87,6 +89,15 @@ int main() {
     auto& b = VCNBridge::singleton();
     auto* profile = DeviceProfile::current();
     check(v.canAdvertise() && !b.userPatchesAllowed(), "personality bootstrap does not require allocated engine");
+    check(v.isHEVC10EncodeAllowed(), "validated Renoir can advertise Main10 before engine allocation");
+    for (bool* flag : {&v.enabled, &v.hevcAllowed, &v.hevc10Allowed}) {
+        *flag = false;
+        check(!v.isHEVC10EncodeAllowed(), "each media/HEVC/Main10 boot opt-out blocks Main10 encode");
+        *flag = true;
+    }
+    NRed::singleton().device = 0x1638;
+    check(!v.isHEVC10EncodeAllowed(), "untested device retains Main-only encode");
+    NRed::singleton().device = 0x1636;
     v.enabled = false;
     check(!v.canAdvertise(), "NoVDA withdraws capabilities");
     v.enabled = true;
@@ -96,6 +107,7 @@ int main() {
         profile->media.hasVCN0 = blocked != 2;
         profile->media.vcnGeneration = blocked == 3 ? 0x100 : DeviceProfile::kVcn2_2;
         check(!v.canAdvertise(), "unsupported build/backend/device/dGPU never advertises bridge");
+        check(!v.isHEVC10EncodeAllowed(), "unsupported media prerequisites also block Main10 encode");
     }
     UserPatches::singleton().supported = true; NRed::singleton().external = false;
     profile->media.hasVCN0 = true; profile->media.vcnGeneration = DeviceProfile::kVcn2_2;
@@ -111,6 +123,7 @@ int main() {
     check(!VCNBridge::initHardware(nullptr, 1), "native channel initialization failure propagated");
     check(!b.userPatchesAllowed() && !v.canAdvertise() && b.mediaFailure == 8,
           "hardware failure also disables page patching and advertisement");
+    check(!v.isHEVC10EncodeAllowed(), "latched hardware failure blocks Main10 encode");
     check(b.engineEnabled() && !X5000::singleton().capability,
           "failed channel keeps allocated object ABI while clearing VCN hardware capability");
     b.mediaFailure = 0; b.hardwareHandle = nullptr;
@@ -165,7 +178,7 @@ def main():
 VDA& VDA::singleton() { static VDA v; return v; }
 VCNBridge& VCNBridge::singleton() { static VCNBridge b; return b; }
 """
-    for marker in ("bool VDA::isSupported(", "bool VDA::canAdvertise(",
+    for marker in ("bool VDA::isSupported(", "bool VDA::canAdvertise(", "bool VDA::isHEVC10EncodeAllowed(",
                    "void VDA::stripCapabilities(", "void VDA::withdrawCapabilities("):
         methods += function(va, marker) + "\n"
     for marker in ("bool VCNBridge::loadReady(", "void VCNBridge::setAccelerator(",
@@ -176,6 +189,7 @@ VCNBridge& VCNBridge::singleton() { static VCNBridge b; return b; }
         unit.write_text(STUBS + headers + keys + methods + TESTS)
         subprocess.run(["xcrun", "clang++", "-std=c++17", "-O1", "-g", "-fsanitize=address,undefined",
                         "-fno-omit-frame-pointer", str(unit), "-o", str(binary)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True)
         return subprocess.run([str(binary)]).returncode
 
 

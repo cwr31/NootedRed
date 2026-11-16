@@ -266,6 +266,7 @@ void VCNBridge::failMedia(const UInt32 reason)
     NRed::singleton().setProp32("NRedVCNMediaFailure", reason);
     NRed::singleton().setProp32("NRedVDAMediaEnabled", 0);
     NRed::singleton().setProp32("NRedVCNUserPatchesAllowed", 0);
+    NRed::singleton().setProp32("NRedHEVC10EncodeAdvertised", 0);
     // Take a reference under the short state lock. Registry work runs outside it;
     // acceleratorStop can safely clear/release its reference concurrently.
     IOService* accelerator = nullptr;

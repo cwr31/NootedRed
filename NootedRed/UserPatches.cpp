@@ -439,8 +439,8 @@ auto UserPatches::installNativePagePatcher(KernelPatcher& patcher) -> bool
         patcher.clearError();
     }
 
-    NRed::singleton().setProp32("NRedUserPatchRevision", 3);
-    SYSLOG("UserPatch", "Installed per-page backend (revision 3, bounded media manifest, trace %s)",
+    NRed::singleton().setProp32("NRedUserPatchRevision", 4);
+    SYSLOG("UserPatch", "Installed per-page backend (revision 4, P010/Main10 encode manifest, trace %s)",
            this->traceEnabled ? "first 128 writes" : "off");
     return true;
 }

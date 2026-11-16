@@ -42,6 +42,35 @@ SITES = [
     ("SourcePitch_Modern", "SourcePitch_Modern", 0, "__ZN11Vcn2Encoder15setEncodeParamsEPvP15VAVendorTexture"),
 ]
 
+# Exact instruction windows for the reviewed 25G332 VCN2 encoder. These are
+# additional required sites, not a fallback signature search on another build.
+HEVC_ENCODE_SITES = [
+    # Pass the actual source texture to the format builder. The old second
+    # argument was an unused command-info pointer; the context can remain NV12
+    # even when the source texture is P010.
+    ("__ZN12VAUveEncoder13EncodePictureEPvP15VAVendorTextureS0_", 0x14A,
+     "4c89ee", "4c89fe"),
+    # NV12 and P010 share texture enum 0x13. Detect the two-byte source elements
+    # instead, and set both 10-bit depth and P010 packing to 1. RGB has four-byte
+    # elements and retains its context-based branches/constants. Store the
+    # shared colour flags from EAX to make room for the texture-field check.
+    ("__ZN11Vcn2Encoder29setInputAndOutputFormatParamsEP11_UveCmdInfo", 0x1F,
+     "8b879c0000003d3032347874293d7230316c74113d626772617523c5fb10058ce20400"
+     "eb08c5fb100572e20400b001b901000000eb0cc5fa100509e9030031c931c0894dc4894dcc",
+     "83be8400000002742c8b879c0000003d7230316c74113d626772617521c5fb10058ae20400"
+     "eb08c5fb100570e2040031c0ffc0eb0b660f76c0660f72d01f31c08945c48945cc9090"),
+    # This VCN2 path uses PPS chroma offsets, but does not apply the separate
+    # per-slice deltas to encoded pixels. Explicitly signal zero slice deltas
+    # rather than AppleGVA's Main10 Cr=-3, which produces a visible colour error.
+    # These loads execute only when the PPS enables per-slice chroma offsets.
+    # PPS offsets and all luma/rate-control/deblock settings remain native.
+    ("__ZN23AvdVcn2HevcHeaderEncode17encodeSliceHeaderEPvS0_S0_", 0x520,
+     "418bb784070000", "31f69090909090"),
+    ("__ZN23AvdVcn2HevcHeaderEncode17encodeSliceHeaderEPvS0_S0_", 0x530,
+     "418bb788070000", "31f69090909090"),
+]
+REQUIRED_SITES = 14 + len(HEVC_ENCODE_SITES)
+
 
 def arrays():
     text = (ROOT / "NootedRed/VDASignatures.inc").read_text()
@@ -116,6 +145,14 @@ def collect(cache_dir, build, dump_pages=None, kernel=Path("/System/Library/Kern
             if len(candidates) != 1:
                 raise ValueError(f"{symbol}: expected one guarded site, found {len(candidates)}")
             sites.append((function + candidates[0], find, replace, symbol))
+        for symbol, offset, find_hex, replace_hex in HEVC_ENCODE_SITES:
+            function = va.symbol(symbol)
+            find, replace = bytes.fromhex(find_hex), bytes.fromhex(replace_hex)
+            address = function + offset
+            if (len(find) != len(replace) or address + len(find) > va.function_end(function) or
+                    cache.read(address, len(find)) not in (find, replace)):
+                raise ValueError(f"{symbol}+{offset:#x}: reviewed HEVC encode window differs")
+            sites.append((address, find, replace, symbol))
         # AppleGVA has stripped local symbols. Require exactly one guarded
         # selection branch inside its bounded __text section.
         suffix = "Tahoe"
@@ -154,7 +191,7 @@ def collect(cache_dir, build, dump_pages=None, kernel=Path("/System/Library/Kern
                 data[off:previous_end] = bytes(len(find))
             page["masked_sha256"] = hashlib.sha256(data).hexdigest()
             info["pages"].append(page)
-    if sum(len(p["sites"]) for p in info["pages"]) != 14:
+    if sum(len(p["sites"]) for p in info["pages"]) != REQUIRED_SITES:
         raise ValueError("incomplete VA/GVA required-site set")
     return info
 
@@ -195,7 +232,7 @@ def render(info):
         "    };",
         f'    inline constexpr char Build[] = "{info["build"]}";',
         f'    inline constexpr UInt8 KernelUUID[] = {{{cbytes(uuid.UUID(info["kernel_uuid"]).bytes)}}};',
-        "    inline constexpr size_t RequiredSites = 14;",
+        f"    inline constexpr size_t RequiredSites = {REQUIRED_SITES};",
         "    static_assert(arrsize(Pages) > 0 && arrsize(Pages) <= 32);",
         "    inline constexpr UInt32 RequiredPageMask = ~UInt32{0} >> (32 - arrsize(Pages));",
         "}", "",
@@ -223,13 +260,13 @@ def main():
             raise ValueError("on-disk kernel differs from the running kernel UUID")
     if args.candidate:
         args.candidate.write_text(json.dumps(info, indent=2) + "\n")
-        print(f"Candidate: {len(info['pages'])} bounded pages, 14 required sites. Review before use.")
+        print(f"Candidate: {len(info['pages'])} bounded pages, {REQUIRED_SITES} required sites. Review before use.")
         print("Fingerprints are observed bytes outside declared patch windows, not independent stock evidence.")
         return 0
     expected = json.loads(MANIFEST.read_text())
     if expected != info or HEADER.read_text() != render(expected):
         raise ValueError("OS/image identities, required sites, page fingerprints or generated header differ")
-    print(f"PASS {build}: exact cache and both image UUIDs; {len(info['pages'])} page fingerprints, 14 required sites")
+    print(f"PASS {build}: exact cache and both image UUIDs; {len(info['pages'])} page fingerprints, {REQUIRED_SITES} required sites")
     return 0
 
 

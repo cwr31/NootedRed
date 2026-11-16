@@ -566,6 +566,7 @@ def main():
             "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-unused-variable",
             "-Wno-unused-const-variable", "-Wno-deprecated-declarations", str(unit), "-o", str(binary),
         ], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True)
         cmd = [str(binary)]
         if args.host_gl_snapshot or args.media_pages:
             cmd.append(str(args.host_gl_snapshot.resolve()) if args.host_gl_snapshot else "")

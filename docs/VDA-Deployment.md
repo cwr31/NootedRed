@@ -1,9 +1,9 @@
 # VCN media deployment and validation
 
 Hardware media is enabled by default. `-NRedNoVDA` disables the bridge and its
-codec properties; `-NRedNoHEVC` keeps AVC only; `-NRedNoHEVC10` removes Main10
-decode through the existing Main-only policy (which also omits 8-bit Main Still
-Picture). The old `-NRedVDA` argument is not required. Optional VP9 still requires
+codec properties; `-NRedNoHEVC` keeps AVC only; `-NRedNoHEVC10` disables Main10
+encode and decode through the Main-only policy (which also omits 8-bit Main Still
+Picture decode). The old `-NRedVDA` argument is not required. Optional VP9 still requires
 `-NRedVP9` and the matching plugin cdhash.
 
 This fork's hardened VA/GVA path currently has one checked-in manifest:
@@ -25,11 +25,11 @@ tools/vda_preflight.sh
 
 The artifact is
 `build/branches/<branch>/macosx/x86_64/release/NootedRed.kext`.
-Preflight checks the current cache and both image UUIDs, all 14 required VA/GVA
-sites, nine page fingerprints and the generated manifest. It submits no GPU work.
+Preflight checks the current cache and both image UUIDs, all 18 required VA/GVA
+sites, eleven page fingerprints and the generated manifest. It submits no GPU work.
 
 `tools/media_patch_manifest.py` reads only image metadata, named VA functions,
-AppleGVA's bounded `__text`, and the nine target pages. It never scans/maps the
+AppleGVA's bounded `__text`, and the eleven target pages. It never scans/maps the
 entire cache. Site windows accept only their declared original or replacement;
 only those windows are zeroed for the page SHA-256. UUIDs are verified in preflight.
 Runtime pins the kernel Mach-O UUID before enabling media. `kern.osversion` can
@@ -78,7 +78,10 @@ The default matrix is 30 frames each:
 - H.264 High and HEVC Main 8-bit encode/decode at 1920×1080,
   1918×1080 and 3840×2160;
 - independent software-encoded H.264 / HEVC Main / HEVC Main10 1080p input
-  with B frames, decoded by hardware.
+  with B frames, decoded by hardware;
+- HEVC Main10 encode/decode at all three dimensions when
+  `NRedHEVC10EncodeAdvertised=1`. Use `tools/vda_hwtest.sh --require-main10`
+  to fail before submitting GPU work if this feature is missing after reboot.
 
 The encoder uses its NV12 IOSurface pixel-buffer pool and actual row pitches.
 Independent PyAV/FFmpeg software decoding is compared with the hardware output
@@ -86,7 +89,9 @@ over effective NV12/P010 pixels, excluding row padding. B frames are ordered by
 PTS; duplicate timestamps, dropped/missing frames, unexpected dimensions/format
 and any pixel mismatch fail the test. A sampled Y/U/V source reconstruction
 check (minimum 30 dB PSNR on this synthetic pattern) also catches pitch/chroma
-errors that matching decoders of the same bad encode would miss.
+errors that matching decoders of the same bad encode would miss. Main10 source
+samples vary all ten bits; source quality is measured directly in
+`yuv420p10le`, without reducing the result to eight bits first.
 
 No generated binaries, media or logs are written into the source checkout.
 `--work-dir` selects an external report directory. `results.json` records which
@@ -129,17 +134,32 @@ Useful properties:
 
 | Property | Meaning |
 | --- | --- |
-| `NRedUserPatchRevision=3` | hardened page backend |
+| `NRedUserPatchRevision=4` | bounded page backend with the P010/Main10 encode fixes |
 | `NRedMediaKernelValidated=1` | exact kernel Mach-O UUID matched |
 | `NRedMediaPatchSupported=1` | exact build and page hook available |
-| `NRedMediaPatchPagesExpected=9` | required VA/GVA pages |
-| `NRedMediaPatchSitesExpected=14` | required sites |
+| `NRedMediaPatchPagesExpected=11` | required VA/GVA pages |
+| `NRedMediaPatchSitesExpected=18` | required sites |
+| `NRedHEVC10EncodeAdvertised=1` | validated Renoir Main10 encode capability published |
 | `NRedMediaPatchPagesObserved` | bitmask of validated page indices |
 | `NRedMediaPatchComplete=1` | every required page observed at least once |
 | `NRedVCNUserPatchesAllowed=1` | allocated bridge may patch media pages |
 | `NRedVCNMediaFailure` | first failure; absent/zero on a healthy boot |
 
-Main10 **decode** passed on Renoir 4750U. The current macOS driver rejects an
-explicit hardware Main10 **encode** profile (`-12900`, unsupported property).
-Encoding personalities remain profile 1 / HEVC Main 8-bit. Do not publish profile
-2 merely because the VCN hardware family has 10-bit capability.
+Main10 **encode and decode** passed bounded process-local hardware validation on
+Renoir 4750U / PCI `0x1636`, using this manifest's exact instruction replacements.
+The XML retains conservative Main-only encoding defaults. Runtime adds encode
+profile 2 and capability level `"2"` only for that device, the matching media
+backend/build and enabled HEVC/Main10 policy.
+
+The encode changes select P010 from the actual source texture's two-byte
+elements, set both input bit depth and packing, and signal zero per-slice chroma
+QP deltas to match the tested VCN2 output. NV12 and P010 share the same internal
+texture enum, so enum-only detection is insufficient. Native GPU source pitch,
+10-bit reference-buffer allocation, bitrate and luma QP logic are retained.
+Independent per-slice chroma QP deltas are not exposed by this compatibility
+path. Main10 support does not imply HDR metadata handling or 4K60 throughput
+acceptance. See `analysis/hevc-main10-20261116.md` for the evidence and test scope.
+
+The new EFI kext still requires a reboot and the public-API test afterward.
+Process-local tests do not prove that a newly built kext has loaded, that
+personality injection ran, or that every new page was patched at boot.

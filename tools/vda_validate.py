@@ -51,6 +51,20 @@ def compare_frames(actual, reference, expected):
     if mismatch:
         raise ValueError(f"{len(mismatch)} effective-pixel mismatches; first display frame={mismatch[0]}")
 
+def source_samples(shape, plane, index, bits):
+    """Independent reference for the native probe's effective source pixels."""
+    import numpy as np
+    y, x = np.indices(shape)
+    high = (16 + (x // 8 + y // 8 + index * 3) % 220 if plane == 0 else
+            64 + ((y if plane == 1 else x) + index) % 128)
+    if bits == 8:
+        return high
+    if bits != 10:
+        raise ValueError(f"unsupported source bit depth: {bits}")
+    low = ((x + y + index) % 4 if plane == 0 else
+           (x + (y if plane == 1 else 2 * y) + index + (plane == 2)) % 4)
+    return high * 4 + low
+
 
 def reference(path, pixfmt, encoded, expected):
     import av
@@ -72,18 +86,18 @@ def reference(path, pixfmt, encoded, expected):
             # Independent reconstruction check catches wrong pitch/chroma that
             # hardware-vs-software decode of the same bad encode would miss.
             if encoded and index in (0, expected // 2, expected - 1):
-                planar = source.reformat(format="yuv420p")
+                bits = 10 if pixfmt == "p010le" else 8
+                planar = source.reformat(format="yuv420p10le" if bits == 10 else "yuv420p")
                 scores = []
                 for pindex, plane in enumerate(planar.planes):
-                    actual = np.ndarray((plane.height, plane.width), dtype=np.uint8,
-                                        buffer=memoryview(plane), strides=(plane.line_size, 1))
-                    y, x = np.indices(actual.shape)
-                    target = (16 + (x // 8 + y // 8 + index * 3) % 220 if pindex == 0 else
-                              64 + ((y if pindex == 1 else x) + index) % 128)
+                    itemsize = 2 if bits == 10 else 1
+                    actual = np.ndarray((plane.height, plane.width), dtype="<u2" if bits == 10 else np.uint8,
+                                        buffer=memoryview(plane), strides=(plane.line_size, itemsize))
+                    target = source_samples(actual.shape, pindex, index, bits)
                     mse = np.mean((actual.astype(np.float64) - target) ** 2)
-                    score = 99.0 if mse == 0 else 10 * math.log10(255 ** 2 / mse)
+                    score = 99.0 if mse == 0 else 10 * math.log10(((1 << bits) - 1) ** 2 / mse)
                     scores.append(round(score, 3))
-                quality.append({"frame": index, "psnr_y_u_v": scores})
+                quality.append({"frame": index, "source_bits": bits, "psnr_y_u_v": scores})
         profile = stream.codec_context.profile
     if quality and min(min(row["psnr_y_u_v"]) for row in quality) < 30:
         raise ValueError(f"source reconstruction PSNR below 30 dB: {quality}")
@@ -130,6 +144,7 @@ def main():
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--require-manifest", action="store_true")
+    parser.add_argument("--require-main10", action="store_true", help="fail before submitting work if Main10 encode is not advertised")
     args = parser.parse_args()
     if sys.platform != "darwin":
         print("INCOMPLETE: macOS is required"); return 77
@@ -149,6 +164,8 @@ def main():
     if "-NRedNoVDA" in bootargs:
         print("SKIP: hardware media explicitly disabled by -NRedNoVDA"); return 77
     before = markers()
+    if args.require_main10 and before.get("NRedHEVC10EncodeAdvertised") != 1:
+        raise ValueError("Main10 encode not advertised by this boot; install/reboot with the matching kext first")
     for key in ("NRedVCNX5000ABIValidated", "NRedVCNX6000ABIValidated",
                 "NRedVCNNativeLoadReady", "NRedVCNEngineAllocated"):
         if before.get(key) != 1:
@@ -165,6 +182,7 @@ def main():
          str(ROOT / "tools/vda_codec_probe.m"), "-framework", "Foundation",
          "-framework", "AVFoundation", "-framework", "VideoToolbox",
          "-framework", "CoreMedia", "-framework", "CoreVideo", "-o", str(binary)], work / "build.log")
+    run(["codesign", "--force", "--sign", "-", str(binary)], work / "sign.log")
     failed = False
     cases = []
     codecs = ["h264"]
@@ -179,14 +197,20 @@ def main():
         cases.append((f"{codec}-bframes-1080p", codec, 1920, 1080, 8, False))
     if "hevc" in codecs and "-NRedNoHEVC10" not in bootargs:
         cases.append(("hevc-main10-bframes-1080p", "hevc", 1920, 1080, 10, False))
+        if before.get("NRedHEVC10EncodeAdvertised") == 1:
+            for width, height in [(1920, 1080), (1918, 1080), (3840, 2160)]:
+                cases.append((f"hevc-main10-{width}x{height}", "hevc", width, height, 10, True))
+        else:
+            report["skipped"].append("Main10 encode: not advertised by this boot")
     else:
-        report["skipped"].append("Main10 decode: disabled by boot policy")
+        report["skipped"].append("Main10 encode/decode: disabled by boot policy")
     for name, codec, width, height, bits, encoded in cases:
         row = {"case": name, "expected_frames": args.frames, "hardware_encode": encoded}
         try:
             prefix = work / name
             if encoded:
-                log = run([str(binary), "encode", codec, str(width), str(height), str(args.frames), str(prefix)],
+                log = run([str(binary), "encode", "hevc10" if bits == 10 else codec,
+                           str(width), str(height), str(args.frames), str(prefix)],
                           work / f"{name}.log")
                 source = work / f"{name}.{codec}"
                 if "encode_hardware=1 query_status=0" not in log:

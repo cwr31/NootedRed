@@ -1,6 +1,7 @@
 {
   "schema": 1,
   "build": "25G332",
+  "kernel_uuid": "28267FD5-3E1E-3686-8A1C-E73E2466FCFB",
   "cache_uuid": "21FB8708-FC8E-3765-BE8C-65D612CDF049",
   "images": [
     {
@@ -114,6 +115,38 @@
     },
     {
       "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b45000",
+      "sites": [
+        {
+          "offset": 3340,
+          "find": "4c89ee",
+          "replace": "4c89fe",
+          "symbol": "__ZN12VAUveEncoder13EncodePictureEPvP15VAVendorTextureS0_"
+        }
+      ],
+      "masked_sha256": "07c11ae9a0493da7e67ca1455dbe3ea812257d9c80824d018df8f3b17df638da"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b47000",
+      "sites": [
+        {
+          "offset": 1496,
+          "find": "418bb784070000",
+          "replace": "31f69090909090",
+          "symbol": "__ZN23AvdVcn2HevcHeaderEncode17encodeSliceHeaderEPvS0_S0_"
+        },
+        {
+          "offset": 1512,
+          "find": "418bb788070000",
+          "replace": "31f69090909090",
+          "symbol": "__ZN23AvdVcn2HevcHeaderEncode17encodeSliceHeaderEPvS0_S0_"
+        }
+      ],
+      "masked_sha256": "af7d0518251481083089b5f8026c9ea6dea44cb828c00b193fc5ddbfcd81146a"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
       "offset": "0x10b49000",
       "sites": [
         {
@@ -121,9 +154,15 @@
           "find": "8b8a840000008b87240400000fafc105ff0000002500ffffff",
           "replace": "8b82800000008b8a8400000090909090909090909090909090",
           "symbol": "__ZN11Vcn2Encoder15setEncodeParamsEPvP15VAVendorTexture"
+        },
+        {
+          "offset": 3425,
+          "find": "8b879c0000003d3032347874293d7230316c74113d626772617523c5fb10058ce20400eb08c5fb100572e20400b001b901000000eb0cc5fa100509e9030031c931c0894dc4894dcc",
+          "replace": "83be8400000002742c8b879c0000003d7230316c74113d626772617521c5fb10058ae20400eb08c5fb100570e2040031c0ffc0eb0b660f76c0660f72d01f31c08945c48945cc9090",
+          "symbol": "__ZN11Vcn2Encoder29setInputAndOutputFormatParamsEP11_UveCmdInfo"
         }
       ],
-      "masked_sha256": "d818e55da16a72349aee98a272f935556a32ecdbbf82fd1cbb8b9789adebfb56"
+      "masked_sha256": "deee19f4fa19fc2581e13c448cf697ca8af87bc4f28e27e34058df7528a88d47"
     },
     {
       "file": "dyld_shared_cache_x86_64h.03",
@@ -164,6 +203,5 @@
       ],
       "masked_sha256": "fb8b5282fe33109c06063471ae8109952dfbd2afa56ae2e39f4549c58c887768"
     }
-  ],
-  "kernel_uuid": "28267FD5-3E1E-3686-8A1C-E73E2466FCFB"
+  ]
 }

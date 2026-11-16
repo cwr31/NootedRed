@@ -236,12 +236,15 @@ int main(int argc, const char **argv) { @autoreleasepool {
         }
         for(int j=0;j<h;j++) for(int i=0;i<w;i++) {
             unsigned value=16+(i/8+j/8+frame*3)%220;
-            if (tenbit) ((uint16_t*)(y+j*ys))[i]=(value*4)<<6; else y[j*ys+i]=value;
+            // Exercise all ten source bits; an 8-bit pattern shifted left by
+            // two cannot validate the P010 input path's low-bit handling.
+            if (tenbit) ((uint16_t*)(y+j*ys))[i]=(value*4+(i+j+frame)%4)<<6; else y[j*ys+i]=value;
         }
         for(int j=0;j<h/2;j++) for(int i=0;i<w;i+=2) {
             unsigned u=64+(j+frame)%128, v=64+(i/2+frame)%128;
             if (tenbit) {
-                ((uint16_t*)(uv+j*uvs))[i]=(u*4)<<6; ((uint16_t*)(uv+j*uvs))[i+1]=(v*4)<<6;
+                ((uint16_t*)(uv+j*uvs))[i]=(u*4+(i/2+j+frame)%4)<<6;
+                ((uint16_t*)(uv+j*uvs))[i+1]=(v*4+(i/2+2*j+frame+1)%4)<<6;
             } else {uv[j*uvs+i]=u;uv[j*uvs+i+1]=v;}
         }
         CVPixelBufferUnlockBaseAddress(pb,0);

@@ -53,6 +53,9 @@ public:
     // Does not require an allocated engine; personality injection happens first.
     bool isSupported() const;
     bool canAdvertise() const;
+    // Main10 encode additionally requires the tested Renoir device and the
+    // exact manifest containing the P010/header fixes. Boot opt-outs apply.
+    bool isHEVC10EncodeAllowed() const;
     static void stripCapabilities(OSDictionary* dictionary);
     static void withdrawCapabilities(IORegistryEntry* entry);
 
@@ -65,7 +68,7 @@ public:
     // True when HEVC hardware decode (8-bit) is allowed (default true, disabled by -NRedNoHEVC or -NRedNoVDA).
     bool isHEVCDecodeAllowed() const { return this->enabled && this->hevcAllowed; }
 
-    // True when HEVC 10-bit (Profile 2 / Main 10) hardware decode is allowed.
+    // True when HEVC 10-bit (Profile 2 / Main 10) is requested.
     // Default true: AMD VCN 2.2 fully supports 10-bit HEVC decode via AMDRadeonVADriver2.
     // Can be disabled with -NRedNoHEVC10 if explicitly desired.
     bool isHEVC10Allowed() const { return this->enabled && this->hevcAllowed && this->hevc10Allowed; }
