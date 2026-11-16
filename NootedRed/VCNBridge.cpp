@@ -103,7 +103,7 @@ namespace
         // the engine (0x1638 is validated; the other VCN 2.x APUs are experimental) may use this bridge.  The
         // generated ABI guards and the exact build check remain the hard safety gates.
         const auto* const profile = DeviceProfile::current();
-        return isSupportedBuild() && !NRed::singleton().hasExternalVideo() && profile != nullptr
+        return isSupportedBuild() && VDA::singleton().canAdvertise() && profile != nullptr
                && profile->media.vcnGeneration == DeviceProfile::kVcn2_2 && profile->media.hasVCN0;
     }
 
@@ -228,6 +228,14 @@ void VCNBridge::init()
         return;
     }
 
+    this->acceleratorLock = IOLockAlloc();
+    if (this->acceleratorLock == nullptr) {
+        this->requested = false;
+        this->mediaFailure = 20;
+        SYSLOG("VCN", "Cannot allocate media state lock; bridge disabled");
+        return;
+    }
+
     // Register the optional X6000 load callback up front.  The kext is only requested from inside the
     // X5000 accelerator start, i.e. after both drivers' load hooks are in place.
     lilu.onKextLoadForce(&kextRadeonX6000);
@@ -240,11 +248,46 @@ bool VCNBridge::loadReady() const
     return this->requested && this->x5000Prepared && this->x6000Prepared && this->loadCompleted;
 }
 
+void VCNBridge::setAccelerator(IOService* const accelerator)
+{
+    if (this->acceleratorLock == nullptr) { return; }
+    if (accelerator != nullptr) { accelerator->retain(); }
+    IOLockLock(this->acceleratorLock);
+    auto* const previous = this->acceleratorHandle;
+    this->acceleratorHandle = accelerator;
+    IOLockUnlock(this->acceleratorLock);
+    if (previous != nullptr) { previous->release(); }
+}
+
+void VCNBridge::failMedia(const UInt32 reason)
+{
+    if (reason == 0 || !OSCompareAndSwap(0, reason, &this->mediaFailure)) { return; }
+    publishReject(reason);
+    NRed::singleton().setProp32("NRedVCNMediaFailure", reason);
+    NRed::singleton().setProp32("NRedVDAMediaEnabled", 0);
+    NRed::singleton().setProp32("NRedVCNUserPatchesAllowed", 0);
+    // Take a reference under the short state lock. Registry work runs outside it;
+    // acceleratorStop can safely clear/release its reference concurrently.
+    IOService* accelerator = nullptr;
+    if (this->acceleratorLock != nullptr) {
+        IOLockLock(this->acceleratorLock);
+        accelerator = this->acceleratorHandle;
+        if (accelerator != nullptr) { accelerator->retain(); }
+        IOLockUnlock(this->acceleratorLock);
+    }
+    if (accelerator != nullptr) {
+        VDA::withdrawCapabilities(accelerator);
+        accelerator->release();
+    }
+    SYSLOG("VCN", "Media bridge failed (%u); new page patches/capabilities disabled until reboot", reason);
+}
+
 void* VCNBridge::allocateEngine(void* const hardware)
 {
     if (!this->requested) { return nullptr; }
 
-    if (!this->loadReady() || this->engineMC == nullptr) {
+    if (!this->loadReady() || this->hasMediaFailed() || !VDA::singleton().canAdvertise() ||
+        this->engineMC == nullptr) {
         NRed::singleton().setProp32("NRedVCNEngineAllocated", 0);
         return nullptr;
     }
@@ -255,8 +298,9 @@ void* VCNBridge::allocateEngine(void* const hardware)
 
     NRed::singleton().setProp32("NRedVCNEngineAllocated", static_cast<UInt32>(this->engineAllocated));
     NRed::singleton().setProp32("NRedVDAMediaEnabled", static_cast<UInt32>(this->engineAllocated));
+    NRed::singleton().setProp32("NRedVCNUserPatchesAllowed", this->userPatchesAllowed() ? 1 : 0);
     if (!this->engineAllocated) {
-        publishReject(7);
+        this->failMedia(7);
         SYSLOG("VCN", "Failed to allocate AMDVCN2HWEngine");
         this->loadCompleted = false;
     }
@@ -270,6 +314,10 @@ void* VCNBridge::allocateEngine(void* const hardware)
 bool VCNBridge::acceleratorStart(void* const self, IOService* const provider)
 {
     auto& bridge = singleton();
+    bridge.setAccelerator(static_cast<IOService*>(self));
+    if (!VDA::singleton().canAdvertise()) {
+        VDA::withdrawCapabilities(static_cast<IOService*>(self));
+    }
     if (bridge.requested) {
 
         if (currentKernelVersion().major() == 22) {
@@ -282,8 +330,10 @@ bool VCNBridge::acceleratorStart(void* const self, IOService* const provider)
     // A partially prepared X5000 must never force-load X6000 or install any hook: the normal accelerator
     // start path is enough.  The device/profile check is done here, after NRed has set the device ID.
     if (!bridge.requested || !bridge.x5000Prepared || !isSupportedDevice()) {
-        if (bridge.requested) { publishReject(2); }
-        return FunctionCast(acceleratorStart, bridge.orgAcceleratorStart)(self, provider);
+        if (bridge.requested) { bridge.failMedia(2); }
+        const auto result = FunctionCast(acceleratorStart, bridge.orgAcceleratorStart)(self, provider);
+        if (!result) { bridge.setAccelerator(nullptr); }
+        return result;
     }
 
     // Only the APU that NRed actually drives may trigger the bridge.  If the provider is not a PCI device we
@@ -294,7 +344,10 @@ bool VCNBridge::acceleratorStart(void* const self, IOService* const provider)
         const auto device = WIOKit::readPCIConfigValue(pci, WIOKit::kIOPCIConfigDeviceID);
         if (vendor != WIOKit::VendorID::ATIAMD || device != NRed::singleton().getDeviceID()) {
             SYSLOG("VCN", "accelerator start provider mismatch (0x%X:0x%X), not bridging", vendor, device);
-            return FunctionCast(acceleratorStart, bridge.orgAcceleratorStart)(self, provider);
+            bridge.failMedia(2);
+            const auto result = FunctionCast(acceleratorStart, bridge.orgAcceleratorStart)(self, provider);
+            if (!result) { bridge.setAccelerator(nullptr); }
+            return result;
         }
     }
 
@@ -305,7 +358,7 @@ bool VCNBridge::acceleratorStart(void* const self, IOService* const provider)
         bridge.loadCompleted = status == kOSReturnSuccess && bridge.x5000Prepared && bridge.x6000Prepared;
         NRed::singleton().setProp32("NRedVCNNativeLoadStatus", static_cast<UInt32>(status));
         NRed::singleton().setProp32("NRedVCNNativeLoadReady", static_cast<UInt32>(bridge.loadCompleted));
-        if (!bridge.loadCompleted) { publishReject(6); }
+        if (!bridge.loadCompleted) { bridge.failMedia(6); }
         SYSLOG("VCN", "X6000 native load status=0x%X prepared5=%u prepared6=%u", status, bridge.x5000Prepared,
                bridge.x6000Prepared);
     }
@@ -317,6 +370,7 @@ bool VCNBridge::acceleratorStart(void* const self, IOService* const provider)
 
 
     if (!result) {
+        bridge.failMedia(14);
         bridge.loadCompleted   = false;
         bridge.engineAllocated = false;
         NRed::singleton().setProp32("NRedVCNEngineAllocated", 0);
@@ -325,6 +379,7 @@ bool VCNBridge::acceleratorStart(void* const self, IOService* const provider)
             X5000::singleton().setVCN0Capability(bridge.hardwareHandle, false);
             bridge.hardwareHandle = nullptr;
         }
+        bridge.setAccelerator(nullptr);
     }
 
     return result;
@@ -340,9 +395,11 @@ void VCNBridge::acceleratorStop(void* const self, IOService* const provider)
     // allocate a fresh engine.
     bridge.engineAllocated = false;
     bridge.hardwareHandle  = nullptr;
+    bridge.setAccelerator(nullptr);
 
     NRed::singleton().setProp32("NRedVCNEngineAllocated", 0);
     NRed::singleton().setProp32("NRedVDAMediaEnabled", 0);
+    NRed::singleton().setProp32("NRedVCNUserPatchesAllowed", 0);
 }
 
 void* VCNBridge::newShared()
@@ -429,16 +486,13 @@ bool VCNBridge::initHardware(void* const self, const UInt32 channel)
         return true;
     }
     publishStage(12);
-    publishReject(8);
+    bridge.failMedia(8);
 
-    // The engine did not come up.  Stop advertising VCN0 and gate future user-space patches on the failed
-    // bridge; already patched decoder processes keep the patched VA/GVA code until they exit, which is the
-    // best that can be done without a reboot.
+    // The engine did not come up. Already patched shared-cache pages stay patched;
+    // a boolean cannot restore them or force every existing client to use software.
+    // The allocated objects/drivers still exist. Keep their cross-driver ABI
+    // routing until stop(), including other channels' live clients.
     SYSLOG("VCN", "VCN2 initHardware channel=%u failed; disabling the VCN bridge", channel);
-    bridge.engineAllocated = false;
-    bridge.loadCompleted   = false;
-    NRed::singleton().setProp32("NRedVCNEngineAllocated", 0);
-    NRed::singleton().setProp32("NRedVDAMediaEnabled", 0);
     if (bridge.hardwareHandle != nullptr) {
         X5000::singleton().setVCN0Capability(bridge.hardwareHandle, false);
     }
@@ -493,19 +547,37 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
     if (id == kextRadeonX5000.loadIndex) {
         NRed::singleton().setProp32("NRedVCNX5000Seen", 1);
         publishStage(2);
+        if (!VDA::singleton().isSupported()) {
+            this->failMedia(1);
+            SYSLOG("VCN", "No validated media manifest/device/backend; keeping graphics-only mode");
+            return;
+        }
+
+        // Keep the lifecycle/property gate even when a later ABI/symbol check
+        // rejects the bridge. Personalities are injected before these checks;
+        // start() must withdraw their codec properties before exposing a service.
+        KernelPatcher::RouteRequest lifecycleRoutes[] = {
+            {"__ZN37AMDRadeonX5000_AMDGraphicsAccelerator5startEP9IOService", acceleratorStart,
+             this->orgAcceleratorStart},
+            {"__ZN37AMDRadeonX5000_AMDGraphicsAccelerator4stopEP9IOService", acceleratorStop,
+             this->orgAcceleratorStop},
+        };
+        if (!patcher.routeMultiple(id, lifecycleRoutes, arrsize(lifecycleRoutes), slide, size)) {
+            patcher.clearError();
+            this->failMedia(11);
+            return;
+        }
 
         if (!verifyKernelABI(patcher, id, slide, size, true)) {
             this->x5000Prepared = false;
             NRed::singleton().setProp32("NRedVCNX5000ABIValidated", 0);
-            publishReject(4);
+            this->failMedia(4);
             SYSLOG("VCN", "X5000 ABI mismatch; VCN bridge disabled");
             return;
         }
         publishStage(3);
 
         auto ok = true;
-        ok &= resolve(patcher, id, "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator4stopEP9IOService",
-                      this->orgAcceleratorStop, slide, size);
         ok &= resolve(patcher, id, "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator9newSharedEv", this->orgNewShared,
                       slide, size);
         ok &= resolve(patcher, id, "__ZN37AMDRadeonX5000_AMDGraphicsAccelerator19newSharedUserClientEv",
@@ -523,7 +595,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
         ok &= resolve(patcher, id, "__ZN30AMDRadeonX5000_AMDGFX9Hardware15notifyGfxAccessEv", this->notifyGfxAccess,
                       slide, size);
         if (!ok) {
-            publishReject(9);
+            this->failMedia(9);
             SYSLOG("VCN", "failed to resolve X5000 bridge symbols");
             this->x5000Prepared = false;
             return;
@@ -542,17 +614,13 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
             ok &= resolve(patcher, id, kPairs[i], this->classPairs[i].oldClass, slide, size);
         }
         if (!ok) {
-            publishReject(10);
+            this->failMedia(10);
             SYSLOG("VCN", "failed to resolve X5000 metaclass pairs");
             this->x5000Prepared = false;
             return;
         }
 
         KernelPatcher::RouteRequest routes[] = {
-            {"__ZN37AMDRadeonX5000_AMDGraphicsAccelerator5startEP9IOService", acceleratorStart,
-             this->orgAcceleratorStart},
-            {"__ZN37AMDRadeonX5000_AMDGraphicsAccelerator4stopEP9IOService", acceleratorStop,
-             this->orgAcceleratorStop},
             {"__ZN37AMDRadeonX5000_AMDGraphicsAccelerator9newSharedEv", newShared, this->orgNewShared},
             {"__ZN37AMDRadeonX5000_AMDGraphicsAccelerator19newSharedUserClientEv", newClient, this->orgNewClient},
             {"__ZN41AMDRadeonX5000_AMDGFX9GraphicsAccelerator15newVideoContextEv", newVideo, this->orgNewVideo},
@@ -560,7 +628,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
         };
         if (!patcher.routeMultiple(id, routes, arrsize(routes), slide, size)) {
             patcher.clearError();
-            publishReject(11);
+            this->failMedia(11);
             SYSLOG("VCN", "Failed to route X5000 VCN entry points");
             this->x5000Prepared = false;
             return;
@@ -570,7 +638,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
                                               this->orgSafeMetaCast};
         if (!patcher.routeMultipleLong(KernelPatcher::KernelID, &castRoute, 1)) {
             patcher.clearError();
-            publishReject(12);
+            this->failMedia(12);
             SYSLOG("VCN", "Failed to route safeMetaCast");
             this->x5000Prepared = false;
             return;
@@ -588,7 +656,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
         // Only patch X6000 after we requested the load from the X5000 accelerator start and the X5000 side
         // is fully prepared.  A preloaded X6000 (for a dGPU) must be left alone.
         if (!this->loadAttempted || !this->x5000Prepared || !isSupportedDevice()) {
-            publishReject(3);
+            this->failMedia(3);
             SYSLOG("VCN", "ignoring X6000 load that was not requested by the VCN bridge");
             return;
         }
@@ -596,7 +664,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
         if (!verifyKernelABI(patcher, id, slide, size, false)) {
             this->x6000Prepared = false;
             NRed::singleton().setProp32("NRedVCNX6000ABIValidated", 0);
-            publishReject(5);
+            this->failMedia(5);
             SYSLOG("VCN", "X6000 ABI mismatch; VCN bridge disabled");
             return;
         }
@@ -609,7 +677,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
                 "__ZN35AMDRadeonX6000_AMDAccelVideoContext14processCommandEPj16VideoCommandTypeS0_j",
                 "__ZN35AMDRadeonX6000_AMDAccelVideoContext13fetchResourceEP22_AMDVideoResourceParamP21_AMDVideoResourceInfo",
                 "NRedVideoCommandGuard6000")) {
-            publishReject(13);
+            this->failMedia(13);
             SYSLOG("VCN", "Cannot guard X6000 video resource failure; bridge disabled");
             return;
         }
@@ -638,6 +706,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
         }
         if (!ok) {
             this->x6000Prepared = false;
+            this->failMedia(9);
             return;
         }
 
@@ -667,17 +736,18 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
         static_assert(arrsize(VCNKernelDataTahoe::CallPatches) <= kMaxCallPatches);
 #endif
         if (callPatchCount == 0 || callPatchCount > kMaxCallPatches) {
+            this->failMedia(15);
             SYSLOG("VCN", "unexpected generated call patch count %zu", callPatchCount);
             return;
         }
         mach_vm_address_t addresses[kMaxCallPatches]{};
         mach_vm_address_t signal{0};
-        if (!resolve(patcher, id, signalSymbol, signal, slide, size)) { return; }
+        if (!resolve(patcher, id, signalSymbol, signal, slide, size)) { this->failMedia(9); return; }
 
         for (size_t i = 0; i < callPatchCount; ++i) {
             const auto&       patch = callPatches[i];
             mach_vm_address_t function{0};
-            if (!resolve(patcher, id, patch.symbol, function, slide, size)) { return; }
+            if (!resolve(patcher, id, patch.symbol, function, slide, size)) { this->failMedia(9); return; }
 
             addresses[i] = function + patch.offset;
             if (function > ~mach_vm_address_t{0} - patch.offset || addresses[i] < slide
@@ -685,11 +755,15 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
                 || memcmp(reinterpret_cast<void*>(addresses[i]), patch.original, sizeof(patch.original)) != 0)
             {
                 SYSLOG("VCN", "kernel code mismatch: %s+0x%X", patch.symbol, patch.offset);
+                this->failMedia(16);
                 return;
             }
         }
 
-        if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) { return; }
+        if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) {
+            this->failMedia(22);
+            return;
+        }
 
         for (size_t i = 0; i < callPatchCount; ++i) {
             const auto& patch = callPatches[i];
@@ -730,6 +804,7 @@ void VCNBridge::processKext(KernelPatcher& patcher, const size_t id, const mach_
                 SYSLOG("VCN", "Failed to roll back X6000 call-site patches (kernel write lock)");
             }
             this->x6000Prepared = false;
+            this->failMedia(17);
             SYSLOG("VCN", "Failed to route X6000 VCN entry points; patches rolled back");
             return;
         }

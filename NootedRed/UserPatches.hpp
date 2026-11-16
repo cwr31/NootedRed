@@ -24,6 +24,7 @@
 #include <Headers/kern_patcher.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <Headers/kern_user.hpp>
+#include <MediaPatchPlan.hpp>
 #include <libkern/OSTypes.h>
 
 // Patches Apple's user-space OpenGL drivers, which is where the Chromium/GL corruption originates.
@@ -36,9 +37,9 @@
 //  - macOS 10.15 and older: `lilu.onProcLoad` with `UserPatcher::BinaryModInfo`/`BinaryModPatch`
 //    entries.  No process filter is registered on purpose, so that the patcher never injects the
 //    `__RESTRICT` segment into user processes; page patches are global in Lilu and do not need one.
-//  - macOS 11 and newer: a self-contained `_cs_validate_page`/`_cs_validate_range` hook.  A complete
-//    `kPageSize` page image has to match byte for byte before `find` is replaced with `replace`, so a
-//    patch can never hit an unrelated binary.  See analysis/lilu-userpatch.md for the details.
+//  - macOS 11 and newer: a self-contained `_cs_validate_page`/`_cs_validate_range` hook.
+//    VA/GVA pages require a build-specific manifest, fixed sites and a whole-page SHA-256 with only
+//    those sites masked. GL/Metal use guarded signature contexts. See analysis/lilu-userpatch.md.
 //
 // GLFix is enabled by default (pass -NRedNoGLFix to opt out); VDA hardware video acceleration is also
 // enabled by default (pass -NRedNoHEVC to disable HEVC, or -NRedNoVDA to disable VDA completely).
@@ -150,12 +151,13 @@ public:
     // profile are known (it must run before user processes validate pages).
     void processPatcher(KernelPatcher& patcher);
 
+    // This build has a bounded VA/GVA manifest AND the page hook was installed.
+    // Independent of engine allocation: personality injection precedes accelerator start.
+    bool mediaSupported() const;
+
 private:
     const SignaturePatch* signatures{nullptr};
     size_t                signatureCount{0};
-    const SignaturePatch* vdaSignatures{nullptr};
-    size_t                vdaSignatureCount{0};
-    const SignaturePatch* gvaSignature{nullptr};
     bool                  resolverEnabled{false};
     bool                  resolverOnly{false};
     bool                  traceEnabled{false};
@@ -163,6 +165,8 @@ private:
 
     bool                  enabled{false};
     bool                  vdaEnabled{false};
+    bool                  nativeBackendReady{false};
+    bool                  kernelIdentityMatches{false};
     bool                  vp9RegistryEnabled{false};
     volatile UInt32       vp9RegistryApplied{0};
 
@@ -170,6 +174,7 @@ private:
     auto currentApuMask() const -> ApuMask;
 
     SInt32                vdaAppliedCount{0};
+    volatile UInt32       mediaPagesObserved{0};
 
     mach_vm_address_t orgCsValidatePage{0};
     mach_vm_address_t orgCsValidateRange{0};
@@ -177,6 +182,7 @@ private:
     auto installNativePagePatcher(KernelPatcher& patcher) -> bool;
     void tracePatch(const char* kind, size_t signatureIndex, UInt64 pageOffset, size_t matchOffset);
     void patchSignaturePage(const void* data, UInt64 pageOffset, void* vnode);
+    void patchMediaPage(const UInt8* bytes, const MediaPatchPlan::Page& page, size_t pageIndex);
 
     static void      wrapCsValidatePage(void* vnode, void* pager, UInt64 pageOffset, const void* data, int* validated,
                                         int* tainted, int* nx);

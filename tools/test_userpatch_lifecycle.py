@@ -28,6 +28,7 @@ STUBS = r"""
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -35,6 +36,7 @@ STUBS = r"""
 #include <map>
 #include <string>
 #include <vector>
+#include <CommonCrypto/CommonDigest.h>
 using UInt8 = uint8_t;
 using UInt32 = uint32_t;
 using UInt64 = uint64_t;
@@ -63,6 +65,32 @@ template<class T> T OSIncrementAtomic(volatile T* p) {
     *p = old + 1;
     return old;
 }
+bool OSCompareAndSwap(UInt32 old, UInt32 value, volatile UInt32* p) {
+    if (*p != old) return false;
+    *p = value; return true;
+}
+namespace Buffer {
+    bool reject = false;
+    template<class T> T* create(size_t count) { return reject ? nullptr : (T*)std::malloc(sizeof(T) * count); }
+    template<class T> void deleter(T* p) { if (!p) std::abort(); std::free(p); }
+}
+namespace Crypto {
+    bool reject = false;
+    UInt8* hash(const UInt8* bytes, UInt32 size) {
+        if (reject) return nullptr;
+        auto* result = Buffer::create<UInt8>(32);
+        CC_SHA256(bytes, size, result);
+        return result;
+    }
+}
+char osversion[32] = "25G332";
+struct VCNBridge {
+    bool ready = true, failed = false;
+    unsigned failure = 0;
+    static VCNBridge& singleton() { static VCNBridge b; return b; }
+    bool userPatchesAllowed() const { return ready && !failed; }
+    void failMedia(UInt32 reason) { if (!failed) { failed = true; failure = reason; } }
+};
 unsigned logCalls = 0;
 #define SYSLOG(...) do { ++logCalls; } while (0)
 #define arrsize(x) (sizeof(x) / sizeof((x)[0]))
@@ -177,6 +205,7 @@ void graphicsTests(const Sig* sigs, const char* table) {
         check(replaced(retry,sigs[2],0x100) && replaced(retry,sigs[3],0x280), "Metal pair write retry");
     }
 }
+#ifndef NRED_HAS_MEDIA_MANIFEST
 void mediaTests(const Sig* sigs, size_t count, const Sig* gva, const char* table) {
     for (size_t index = 0; index < count; ++index) {
         UserPatches p; p.resolverEnabled = false; p.vdaEnabled = true;
@@ -193,8 +222,143 @@ void mediaTests(const Sig* sigs, size_t count, const Sig* gva, const char* table
     Page page{}; put(page, *gva, 0x100);
     lifecycle(p, page, "AppleGVA", *gva, 0x100, std::string(table) + " AppleGVA");
 }
-void hostPages(const char* path) {
+#else
+void resetBridge(bool ready = true) {
+    auto& b = VCNBridge::singleton(); b.ready = ready; b.failed = false; b.failure = 0;
+}
+UserPatches media() {
+    UserPatches p; p.vdaEnabled = true; p.nativeBackendReady = true; p.kernelIdentityMatches = true; return p;
+}
+MediaPatchPlan::Page fixturePlan(Page& original) {
+    auto plan = MediaPatchManifest::Pages[2]; // three mutually required sites
+    for (size_t i = 0; i < plan.siteCount; ++i) {
+        const auto& site = plan.sites[i];
+        std::memcpy(original.data() + site.offset, site.find, site.size);
+    }
+    Page normalized{}; bool needsWrite = false;
+    check(MediaPatchPlan::normalize(original.data(), plan, normalized.data(), needsWrite), "valid multi-site fixture");
+    CC_SHA256(normalized.data(), normalized.size(), plan.maskedSHA256);
+    return plan;
+}
+void mediaGuardTests() {
+    std::array<UInt8, 56> kernel{};
+    auto word = [&](size_t at, UInt32 value) { std::memcpy(kernel.data() + at, &value, 4); };
+    word(0, 0xFEEDFACF); word(16, 1); word(20, 24); word(32, 0x1B); word(36, 24);
+    std::memcpy(kernel.data() + 40, MediaPatchManifest::KernelUUID, 16);
+    check(MediaPatchPlan::matchesKernelUUID(kernel.data(), kernel.size(), MediaPatchManifest::KernelUUID),
+          "bounded kernel Mach-O UUID recognized");
+    for (size_t n = 0; n < kernel.size(); ++n)
+        check(!MediaPatchPlan::matchesKernelUUID(kernel.data(), n, MediaPatchManifest::KernelUUID),
+              "truncated kernel load commands rejected");
+    for (size_t n = 40; n < kernel.size(); ++n) {
+        kernel[n] ^= 1;
+        check(!MediaPatchPlan::matchesKernelUUID(kernel.data(), kernel.size(), MediaPatchManifest::KernelUUID),
+              "other kernel UUID rejected");
+        kernel[n] ^= 1;
+    }
+    word(36, 0x10000);
+    check(!MediaPatchPlan::matchesKernelUUID(kernel.data(), kernel.size(), MediaPatchManifest::KernelUUID),
+          "out-of-bounds kernel load command rejected");
+    Page original{}; auto plan = fixturePlan(original);
+    auto allPatched = [&](const Page& p) {
+        for (size_t i = 0; i < plan.siteCount; ++i) {
+            const auto& s = plan.sites[i];
+            if (std::memcmp(p.data() + s.offset, s.replace, s.size)) return false;
+        }
+        return true;
+    };
+    auto p = media(); resetBridge();
+    for (int fault = 0; fault < 5; ++fault) {
+        auto page = original;
+        p.patchMediaPage(page.data(), plan, 2);
+        check(allPatched(page), "all media sites patched on every fresh fault");
+        auto writes = MachInfo::writes;
+        p.patchMediaPage(page.data(), plan, 2);
+        check(allPatched(page) && writes == MachInfo::writes, "media repeated callback does not write");
+    }
+    auto mixed = original;
+    std::memcpy(mixed.data() + plan.sites[0].offset, plan.sites[0].replace, plan.sites[0].size);
+    p.patchMediaPage(mixed.data(), plan, 2);
+    check(allPatched(mixed), "mixed original/patched page finishes all required sites");
+    for (bool siteCorruption : {false, true}) {
+        resetBridge(); auto page = original;
+        page[siteCorruption ? plan.sites[2].offset : 0x80] ^= 0x20;
+        const auto before = page; auto writes = MachInfo::writes;
+        p.patchMediaPage(page.data(), plan, 2);
+        check(page == before && writes == MachInfo::writes, "mismatch writes none of the partners");
+        check(VCNBridge::singleton().failed && VCNBridge::singleton().failure == 21, "mismatch latches media failure");
+        page = original; p.patchMediaPage(page.data(), plan, 2);
+        check(page == original, "failure also stops subsequent valid media pages");
+    }
+    resetBridge(false);
+    auto page = original; p.patchMediaPage(page.data(), plan, 2);
+    check(page == original, "unallocated/failed engine cannot patch pages");
+    resetBridge(); // no successful initHardware is needed to bootstrap the first session
+    p.patchMediaPage(page.data(), plan, 2);
+    check(allPatched(page), "allocated engine can patch before first hardware session");
+    for (const char* build : {"25G241", "25G333", "24H32"}) {
+        resetBridge(); std::strcpy(osversion, build); page = original;
+        p.patchMediaPage(page.data(), plan, 2);
+        check(page == original && !p.mediaSupported(), "unknown build cannot patch media");
+    }
+    std::strcpy(osversion, MediaPatchManifest::Build);
+    resetBridge(); p = media(); p.kernelIdentityMatches = false;
+    page = original; p.patchMediaPage(page.data(), plan, 2);
+    check(page == original && !p.mediaSupported(), "unknown kernel cannot enable media");
+    p.kernelIdentityMatches = true; std::strcpy(osversion, "");
+    p.patchMediaPage(page.data(), plan, 2);
+    check(allPatched(page), "validated kernel UUID supports bootstrap before OS build is published");
+    std::strcpy(osversion, MediaPatchManifest::Build);
+    for (bool failHash : {false, true}) {
+        resetBridge(); p = media(); page = original;
+        Buffer::reject = !failHash; Crypto::reject = failHash;
+        p.patchMediaPage(page.data(), plan, 2);
+        Buffer::reject = Crypto::reject = false;
+        check(page == original && VCNBridge::singleton().failure == 20, "allocation/hash failure contains media without null free");
+    }
+    resetBridge(); p = media();
+    MachInfo::rejectWrites = true; page = original;
+    p.patchMediaPage(page.data(), plan, 2); MachInfo::rejectWrites = false;
+    check(page == original && VCNBridge::singleton().failure == 22, "write failure leaves entire media page unchanged");
+    resetBridge();
+    for (const char* name : {"dyld", "other-dyld_shared_cache_x86_64h.03", "dyld_shared_cache_x86_64h.03.bak",
+                             "AMDRadeonVADriver2", "AppleGVA", "unrelated.bin"}) {
+        page = original;
+        invoke(p, page, name, plan.offset);
+        check(page == original && !VCNBridge::singleton().failed, "reject unrelated basename before hashing");
+    }
+    page = original; invoke(p, page, plan.file, plan.offset + 4096);
+    check(page == original && !VCNBridge::singleton().failed, "reject incorrect media file page");
+    resetBridge();
+}
+void hostMediaPages(const char* path) {
     if (!path) return;
+    auto p = media(); resetBridge();
+    for (size_t i = 0; i < arrsize(MediaPatchManifest::Pages); ++i) {
+        const auto& plan = MediaPatchManifest::Pages[i];
+        std::ifstream file(std::string(path) + "/page-" + std::to_string(i) + ".bin", std::ios::binary);
+        Page snapshot{}; file.read((char*)snapshot.data(), snapshot.size());
+        check(file.gcount() == snapshot.size(), "host media snapshot has exactly one page");
+        for (int fault = 0; fault < 4; ++fault) {
+            auto page = snapshot;
+            for (size_t j = 0; j < plan.siteCount; ++j) {
+                const auto& site = plan.sites[j];
+                std::memcpy(page.data() + site.offset, site.find, site.size);
+            }
+            invoke(p, page, plan.file, plan.offset);
+            for (size_t j = 0; j < plan.siteCount; ++j) {
+                const auto& site = plan.sites[j];
+                check(std::memcmp(page.data() + site.offset, site.replace, site.size) == 0,
+                      "actual host media page: every required site/fresh fault");
+            }
+            check(!VCNBridge::singleton().failed, "actual page fingerprint accepted");
+        }
+    }
+    check(NRed::singleton().props["NRedMediaPatchComplete"] == 1, "all required manifest pages observed");
+}
+#endif
+void hostPages(const char* path) {
+    if (!path || !*path) return;
     std::ifstream f(path, std::ios::binary);
     std::vector<UInt8> image((std::istreambuf_iterator<char>(f)), {});
     check(image.size() == 1809872, "host GL snapshot size");
@@ -276,6 +440,9 @@ void vp9RegistryTests() {
     Page original{};
     std::memcpy(original.data() + Offset, Original, sizeof(Original));
     UserPatches p;
+#ifdef NRED_HAS_MEDIA_MANIFEST
+    p = media(); resetBridge();
+#endif
     p.vp9RegistryEnabled = true;
     for (int fault = 0; fault < 4; ++fault) {
         auto page = original;
@@ -321,6 +488,7 @@ int main(int argc, char** argv) {
     graphicsTests(kResolverSignatures_Sonoma, "Sonoma");
     graphicsTests(kResolverSignatures, "Sequoia");
     graphicsTests(kResolverSignatures_Tahoe, "Tahoe");
+#ifndef NRED_HAS_MEDIA_MANIFEST
     mediaTests(kVDAResolverSignatures_Ventura, arrsize(kVDAResolverSignatures_Ventura),
                &kGVAResolverSignature_Ventura, "Ventura");
     mediaTests(kVDAResolverSignatures_Sonoma, arrsize(kVDAResolverSignatures_Sonoma),
@@ -329,6 +497,10 @@ int main(int argc, char** argv) {
                &kGVAResolverSignature_Sequoia, "Sequoia");
     mediaTests(kVDAResolverSignatures_Modern, arrsize(kVDAResolverSignatures_Modern),
                &kGVAResolverSignature_Tahoe, "Tahoe");
+#else
+    mediaGuardTests();
+    hostMediaPages(argc > 2 ? argv[2] : nullptr);
+#endif
     hostPages(argc > 1 ? argv[1] : nullptr);
 #ifdef NRED_HAS_GL_BUDGET
     budgetTests();
@@ -345,6 +517,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline-ref", help="test repository source at a Git ref")
     parser.add_argument("--host-gl-snapshot", type=Path)
+    parser.add_argument("--media-pages", type=Path)
     args = parser.parse_args()
 
     def read(name):
@@ -358,6 +531,11 @@ def main():
     header = re.sub(r"^#(?:include|pragma).*$", "", read("UserPatches.hpp"), flags=re.M)
     header = header.replace("private:", "public:")
     source = read("UserPatches.cpp")
+    media_header = ""
+    if "MediaPatchManifest::" in source:
+        media_header = "#define NRED_HAS_MEDIA_MANIFEST 1\n" + re.sub(
+            r"^#(?:include|pragma).*$", "", read("MediaPatchPlan.hpp"), flags=re.M)
+        media_header += re.sub(r"^#pragma.*$", "", read("MediaPatchManifest.inc"), flags=re.M)
     budget_header = ""
     if "GLResourceBudgetPatch::find" in source:
         budget_header = "#define NRED_HAS_GL_BUDGET 1\n" + re.sub(
@@ -373,21 +551,26 @@ def main():
     end = source.index("}    // namespace", start) + 1
     tables = source[start:end].replace('#include "VDASignatures.inc"', read("VDASignatures.inc"))
     methods = function(source, "static bool matchSignature(") + "\n"
+    if media_header:
+        methods += function(source, "bool UserPatches::mediaSupported(") + "\n"
+        methods += function(source, "void UserPatches::patchMediaPage(") + "\n"
     if "void UserPatches::tracePatch(" in source:
         methods += function(source, "void UserPatches::tracePatch(") + "\n"
     methods += function(source, "void UserPatches::patchSignaturePage(")
     with tempfile.TemporaryDirectory(prefix="nred-page-test-") as temp:
         unit, binary = Path(temp) / "test.cpp", Path(temp) / "test"
-        unit.write_text(STUBS + budget_header + policy_header + header + tables + methods + TESTS)
+        unit.write_text(STUBS + media_header + budget_header + policy_header + header + tables + methods + TESTS)
         subprocess.run([
             "xcrun", "clang++", "-std=c++17", "-O1", "-g",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
             "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-unused-variable",
-            "-Wno-unused-const-variable", str(unit), "-o", str(binary),
+            "-Wno-unused-const-variable", "-Wno-deprecated-declarations", str(unit), "-o", str(binary),
         ], check=True)
         cmd = [str(binary)]
-        if args.host_gl_snapshot:
-            cmd.append(str(args.host_gl_snapshot.resolve()))
+        if args.host_gl_snapshot or args.media_pages:
+            cmd.append(str(args.host_gl_snapshot.resolve()) if args.host_gl_snapshot else "")
+        if args.media_pages:
+            cmd.append(str(args.media_pages.resolve()))
         return subprocess.run(cmd).returncode
 
 

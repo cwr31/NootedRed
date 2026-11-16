@@ -521,7 +521,7 @@ bool X5000::allocateHWEngines(void* const self)
     [[clang::suppress]] singleton().pm4EngineField(self)   = singleton().pm4EngineMC->alloc();
     [[clang::suppress]] singleton().sdma0EngineField(self) = singleton().sdmaEngineMC->alloc();
 
-    // VCN0 is only populated when the opt-in bridge validated both drivers and allocated the native X6000
+    // VCN0 is only populated when the bridge validated both drivers and allocated the native X6000
     // VCN2 engine.  If allocation fails, make sure the capability does not stay advertised.
     const auto* const profile = DeviceProfile::current();
     if (profile != nullptr && profile->media.hasVCN0 && VCNBridge::singleton().isRequested()) {
@@ -565,10 +565,10 @@ void X5000::wrapSetupAndInitializeHWCapabilities(void* const self)
 
     const auto* const profile = DeviceProfile::current();
 
-    // Media engines stay off unless the user opted in with -NRedVDA, the validated 0x1638 profile advertises
-    // VCN0, and the bridge actually enabled/allocated the native engine.  allocateHWEngines() sets the same
+    // Media engines stay off unless the device/build profile allows VCN0 and the bridge
+    // enabled/allocated the native engine. allocateHWEngines() sets the same
     // capability after a successful allocation, so the result does not depend on the hook ordering.
-    const auto mediaEnabled = VDA::singleton().isRequested() && VCNBridge::singleton().engineEnabled();
+    const auto mediaEnabled = VDA::singleton().canAdvertise() && VCNBridge::singleton().userPatchesAllowed();
 
     singleton().supportedDisplayCountField(self) = 4;
     singleton().hasUVD0Field(self)               = mediaEnabled && profile != nullptr && profile->media.hasUVD0;

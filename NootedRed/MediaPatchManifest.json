@@ -1,0 +1,169 @@
+{
+  "schema": 1,
+  "build": "25G332",
+  "cache_uuid": "21FB8708-FC8E-3765-BE8C-65D612CDF049",
+  "images": [
+    {
+      "path": "/System/Library/Extensions/AMDRadeonVADriver2.bundle/Contents/MacOS/AMDRadeonVADriver2",
+      "uuid": "1181E2CA-31B3-3DF0-90E2-3AE70552D753",
+      "text_start": "0x7ffb10b009e0",
+      "text_size": 551639
+    },
+    {
+      "path": "/System/Library/PrivateFrameworks/AppleGVA.framework/Versions/A/AppleGVA",
+      "uuid": "CC4FCC4C-C670-3359-A682-BCBAEA945214",
+      "text_start": "0x7ffa0c57cf40",
+      "text_size": 806144
+    }
+  ],
+  "pages": [
+    {
+      "file": "dyld_shared_cache_x86_64h.02",
+      "offset": "0xc59f000",
+      "sites": [
+        {
+          "offset": 3557,
+          "find": "0f848c000000",
+          "replace": "0f8478000000",
+          "symbol": "AVDGetGPUAccelerators"
+        }
+      ],
+      "masked_sha256": "7983734e765f718518c3f0df667e5344fd80300b5689ee724c4d14b2d341c179"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b00000",
+      "sites": [
+        {
+          "offset": 3918,
+          "find": "bb0b000000",
+          "replace": "bb05000000",
+          "symbol": "__ZN17VAAcceleratorInfo8identifyEjj"
+        }
+      ],
+      "masked_sha256": "20aa809e0bdcacb3562b8dbc5e7b8e79e55478968a2d58bf4eef243743f81730"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b02000",
+      "sites": [
+        {
+          "offset": 1193,
+          "find": "4181fc8d000000",
+          "replace": "4181fc8e000000",
+          "symbol": "__ZN18VAAddrLibInterface4initEP11VAIOConnectP13sHardwareInfo"
+        },
+        {
+          "offset": 1781,
+          "find": "3d8d000000",
+          "replace": "39c0909090",
+          "symbol": "__ZN4Addr3Lib6CreateEPK18_ADDR_CREATE_INPUTP19_ADDR_CREATE_OUTPUT"
+        },
+        {
+          "offset": 2816,
+          "find": "81fe8d000000",
+          "replace": "39f690909090",
+          "symbol": "__ZN4Addr2V27Gfx9Lib20HwlConvertChipFamilyEjj"
+        }
+      ],
+      "masked_sha256": "eeb1d4b0a947200db8c589c3b6a80493e004b01c36e4693845b339cd4efd2015"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b0d000",
+      "sites": [
+        {
+          "offset": 3935,
+          "find": "8d46ff83f802721f",
+          "replace": "8d46ff83f802eb1f",
+          "symbol": "__ZN9VAFactory29createColourFormatConverterVPEi"
+        }
+      ],
+      "masked_sha256": "a5f7b9abaf3cadeb559172e3ea48ebdf3dc0807dd64870a06f24a712b2af9230"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b0e000",
+      "sites": [
+        {
+          "offset": 33,
+          "find": "8d46ff83f802721f",
+          "replace": "8d46ff83f802eb1f",
+          "symbol": "__ZN9VAFactory17createDitheringVPEi"
+        },
+        {
+          "offset": 163,
+          "find": "8d46ff83f802721f",
+          "replace": "8d46ff83f802eb1f",
+          "symbol": "__ZN9VAFactory17createDeblockerVPEi"
+        },
+        {
+          "offset": 424,
+          "find": "488b86600400008b400c8d48ff83",
+          "replace": "b80200000090909090908d48ff83",
+          "symbol": "__ZN9VAFactory20createGraphicsEngineEP9VAContext"
+        },
+        {
+          "offset": 577,
+          "find": "488b86600400008b400c8d48ff83",
+          "replace": "b80200000090909090908d48ff83",
+          "symbol": "__ZN9VAFactory14createImageBltEP9VAContextj"
+        }
+      ],
+      "masked_sha256": "abbe398454bf4af543630d08aa9bbf61165431e2abade481eb123ad0f7bf1262"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b49000",
+      "sites": [
+        {
+          "offset": 3151,
+          "find": "8b8a840000008b87240400000fafc105ff0000002500ffffff",
+          "replace": "8b82800000008b8a8400000090909090909090909090909090",
+          "symbol": "__ZN11Vcn2Encoder15setEncodeParamsEPvP15VAVendorTexture"
+        }
+      ],
+      "masked_sha256": "d818e55da16a72349aee98a272f935556a32ecdbbf82fd1cbb8b9789adebfb56"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b4b000",
+      "sites": [
+        {
+          "offset": 212,
+          "find": "b8a40000005dc3",
+          "replace": "b8300000005dc3",
+          "symbol": "__ZN14Vcn2EncCommand15getFeedbackSizeEv"
+        }
+      ],
+      "masked_sha256": "4b081cf1f1e57229a97d12b28677d8d861e39446a9e8fe62561fb7974f5a6b85"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b4c000",
+      "sites": [
+        {
+          "offset": 1822,
+          "find": "4869c0a4000000",
+          "replace": "4869c030000000",
+          "symbol": "__ZN26AVDVcn2AvcEncDataProcessor19ProcessEncodeStatusEP19_VAEncodeStatusInfoPvP15VAVendorTexture"
+        }
+      ],
+      "masked_sha256": "4e5d21d7134a9f1f745c2985f120d6b26f760461074c45104e79cc0dba7fefcb"
+    },
+    {
+      "file": "dyld_shared_cache_x86_64h.03",
+      "offset": "0x10b4d000",
+      "sites": [
+        {
+          "offset": 2276,
+          "find": "4869c0a4000000",
+          "replace": "4869c030000000",
+          "symbol": "__ZN27AVDVcn2HevcEncDataProcessor19ProcessEncodeStatusEP19_VAEncodeStatusInfoPvP15VAVendorTexture"
+        }
+      ],
+      "masked_sha256": "fb8b5282fe33109c06063471ae8109952dfbd2afa56ae2e39f4549c58c887768"
+    }
+  ],
+  "kernel_uuid": "28267FD5-3E1E-3686-8A1C-E73E2466FCFB"
+}

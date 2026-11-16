@@ -98,33 +98,22 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
             if (strcmp(driver.identifier, "com.apple.kext.AMDRadeonX5000") == 0) {
                 const auto count = driver.personalities->getCount();
 
-                // If hardware video acceleration is completely disabled (-NRedNoVDA):
-                if (!VDA::singleton().isRequested()) {
+                // Do not advertise the bridge on unsupported builds/devices or after a failure.
+                // Engine allocation is deliberately not required here: it occurs after injection.
+                if (!VDA::singleton().canAdvertise()) {
                     for (UInt32 i = 0; i < count; ++i) {
                         auto* const pDict = OSDynamicCast(OSDictionary, driver.personalities->getObject(i));
-                        if (pDict != nullptr) {
-                            pDict->removeObject("IOGVACodec");
-                            pDict->removeObject("IOGVAHEVCDecode");
-                            pDict->removeObject("IOGVAHEVCDecodeCapabilities");
-                            pDict->removeObject("IOGVAHEVCEncode");
-                            pDict->removeObject("IOGVAHEVCEncodeCapabilities");
-                            pDict->removeObject("IOGVAH264EncodeCapabilities");
-                        }
+                        VDA::stripCapabilities(pDict);
                     }
-                    if (dict != nullptr) {
-                        dict->removeObject("IOGVACodec");
-                        dict->removeObject("IOGVAHEVCDecode");
-                        dict->removeObject("IOGVAHEVCDecodeCapabilities");
-                        dict->removeObject("IOGVAHEVCEncode");
-                        dict->removeObject("IOGVAHEVCEncodeCapabilities");
-                        dict->removeObject("IOGVAH264EncodeCapabilities");
-                    }
-                    DBGLOG("DriverInjector", "-NRedNoVDA active: stripped all hardware video acceleration capabilities from %s", driver.identifier);
+                    VDA::stripCapabilities(dict);
+                    DBGLOG("DriverInjector", "Media bridge unavailable: stripped codec capabilities from %s", driver.identifier);
                 }
                 else {
                     // 1. HEVC Decode policy:
                     // - If !isHEVCDecodeAllowed() (-NRedNoHEVC): strip IOGVAHEVCDecode and IOGVAHEVCDecodeCapabilities.
-                    // - If !isHEVC10Allowed() (-NRedNoHEVC10): strip Profile 2 and 3 so VideoToolbox cleanly stays on 8-bit.
+                    // - If !isHEVC10Allowed() (-NRedNoHEVC10): retain the existing Main-only policy.
+                    //   It removes Main10 (profile 2) and Main Still Picture (profile 3);
+                    //   profile 3 itself is 8-bit, not a second 10-bit profile.
                     // - Default: preserve full native HEVC hardware decode (8-bit and 10-bit at Level 153).
                     if (!VDA::singleton().isHEVCDecodeAllowed()) {
                         for (UInt32 i = 0; i < count; ++i) {
@@ -168,7 +157,7 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
                         if (dict != nullptr) {
                             strip10Bit(dict);
                         }
-                        DBGLOG("DriverInjector", "-NRedNoHEVC10 active: stripped HEVC Profile 2/3 from %s", driver.identifier);
+                        DBGLOG("DriverInjector", "-NRedNoHEVC10 active: restricted HEVC decode to 8-bit Main profile 1 for %s", driver.identifier);
                     }
                     else {
                         DBGLOG("DriverInjector", "Full HEVC hardware decode (8-bit and 10-bit Main 10) enabled for %s", driver.identifier);

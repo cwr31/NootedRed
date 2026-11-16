@@ -5,7 +5,7 @@
 #   tools/deploy_vda.sh --esp /Volumes/EFI --restore  # restore the newest timestamped backup
 #   tools/deploy_vda.sh --list-backups --esp /Volumes/EFI
 #
-# This script never reboots and never edits the OpenCore config/boot-args. Add -NRedVDA yourself (see
+# This script never reboots and never edits the OpenCore config/boot-args. Media is default-on (see
 # docs/VDA-Deployment.md). Run it from the repository root; it needs sudo for the ESP writes.
 set -euo pipefail
 
@@ -124,7 +124,7 @@ case "${ACTION}" in
             exit 1
         fi
         echo "verified installed SHA-256: ${INSTALLED_HASH}"
-        echo "installed. Add -NRedVDA to boot-args for the VDA experiment, then reboot."
-        echo "boot once without -NRedVDA first to confirm the default-off path is still green."
+        echo "installed; reboot to apply. Media is enabled by default on the validated build/device."
+        echo "To disable media, use -NRedNoVDA. Run tools/vda_hwtest.sh after boot."
         ;;
 esac

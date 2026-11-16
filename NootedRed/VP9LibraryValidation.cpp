@@ -3,6 +3,7 @@
 // This optional route admits one exact VP9 plugin cdhash, never AV1 or other code.
 #include <VP9LibraryValidation.hpp>
 #include <VP9PluginAllowlist.inc>
+#include <UserPatches.hpp>
 #include <NRed.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
@@ -51,6 +52,7 @@ void VP9LibraryValidation::processKext(KernelPatcher& patcher, const size_t inde
                                       const mach_vm_address_t address, const size_t size)
 {
     if (!enabled || index != kextAMFI.loadIndex ||
+        !UserPatches::singleton().mediaSupported() ||
         NRed::singleton().getDeviceID() != 0x1636 || NRed::singleton().hasExternalVideo()) {
         return;
     }

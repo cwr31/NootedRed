@@ -22,6 +22,9 @@
 
 #pragma once
 
+class OSDictionary;
+class IORegistryEntry;
+
 // Runtime policy layer for the VDA/VCN hardware video decode work.
 //
 // Hardware video acceleration is enabled by default (AVC + HEVC).
@@ -45,6 +48,13 @@ public:
     // True when hardware video acceleration is enabled (default true, disabled by -NRedNoVDA).
     bool isRequested() const { return this->enabled; }
     bool isEnabled() const { return this->enabled; }
+
+    // Supported device + exact media manifest + installed page backend.
+    // Does not require an allocated engine; personality injection happens first.
+    bool isSupported() const;
+    bool canAdvertise() const;
+    static void stripCapabilities(OSDictionary* dictionary);
+    static void withdrawCapabilities(IORegistryEntry* entry);
 
     // True when only AVC is enabled and HEVC is disabled (-NRedNoHEVC).
     bool isAVCOnly() const { return this->enabled && !this->hevcAllowed; }
