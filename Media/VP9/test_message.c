@@ -103,14 +103,17 @@ int main(void) {
       {64, 64}, {1920, 1080}, {1918, 1080}, {3840, 2160},
       {4096, 2304}, {7680, 4320}, {8192, 4320}, {7680, 4352},
       {8192, 4352}};
+  const unsigned devices[] = {0x1636, 0x1638, 0x164C, 0x15E7, 0x73BF, 0x73AF};
   unsigned checks = test_previous_mvs();
   for (unsigned i = 0; i < sizeof(dimensions) / sizeof(dimensions[0]); i++) {
     uint32_t width = dimensions[i][0], height = dimensions[i][1];
     assert(vcnvp9_dimensions_supported(width, height));
-    for (unsigned tier = 0; tier <= 1; tier++) {
+    for (unsigned dev = 0; dev < sizeof(devices) / sizeof(devices[0]); dev++) {
+      unsigned tier = nredMediaVP9DPBTier(devices[dev]);
       if (!tier && (uint64_t)width * height > VCN_VP9_TIER0_MAX_PIXELS)
         continue;
       params.dpb_tier = tier;
+      params.mif_wrc_en = nredMediaVP9WriteCombine(devices[dev]);
       for (uint32_t depth = 8; depth <= 10; depth += 2) {
         uint32_t bpe = depth == 10 ? 2 : 1;
         uint32_t pitch = al(width * bpe, 256), texh = al(height, 64);
@@ -139,7 +142,9 @@ int main(void) {
         assert(U32(m, 104) == pitch / bpe / 2);
         assert(U32(m, 140) < U32(m, 24));
         assert(U32(m, 148) < U32(m, 24));
-        assert(U32(m, 160) == 0); // Renoir must not receive the VCN3 flag.
+        // Verify each device's actual packet: VCN 2.2 cannot receive Navi's
+        // write-combining flag, and Navi retains the original flag/layout.
+        assert(U32(m, 160) == (tier ? 0 : 1));
         VcnMsgVP9 *vp9 = (VcnMsgVP9 *)(m + 188);
         assert(vp9->bit_depth_luma_minus8 == depth - 8);
         assert(vp9->p010_mode == (depth == 10));
@@ -200,15 +205,23 @@ int main(void) {
     }
     checks++;
   }
-  // The new descriptor is enabled only on the tested Renoir device. Preserve
-  // the tier-0 guard for Navi without allocating or submitting GPU work.
-  VcnVP9 navi = {.maxW = VCN_VP9_MAX_WIDTH, .maxH = VCN_VP9_MAX_HEIGHT,
-                 .deviceID = 0x73BF};
-  parser.fh = (VP9Frame){.width = 8192, .height = 4352, .profile = 0,
-                         .bit_depth = 8, .subsampling_x = 1, .subsampling_y = 1};
-  assert(on_frame(&navi, &parser, VP9_PARSE_DECODE, NULL, 0) == -1);
-  assert(strstr(navi.err, "over the session maximum"));
-  checks++;
+  // Exercise the real frame gate for every backend and both bit depths.
+  // An oversized bitstream stops valid dimensions before any allocation or
+  // submission. This distinguishes VCN 2.2's full rectangle from Navi's
+  // retained tier-0 area bound without involving the GPU.
+  for (unsigned dev = 0; dev < sizeof(devices) / sizeof(devices[0]); dev++) {
+    VcnVP9 session = {.maxW = VCN_VP9_MAX_WIDTH, .maxH = VCN_VP9_MAX_HEIGHT,
+                      .deviceID = devices[dev]};
+    for (unsigned depth = 8; depth <= 10; depth += 2) {
+      parser.fh = (VP9Frame){.width = 8192, .height = 4352,
+                             .profile = depth == 10 ? 2 : 0,
+                             .bit_depth = depth, .subsampling_x = 1, .subsampling_y = 1};
+      assert(on_frame(&session, &parser, VP9_PARSE_DECODE, NULL, BS_SIZE) == -1);
+      assert(strstr(session.err, nredMediaUsesVCN2Bridge(devices[dev])
+                    ? "frame too big" : "over the session maximum"));
+      checks++;
+    }
+  }
   printf("PASS %u VP9 dimensions/actual message/buffer-bound checks; no GPU work\n", checks);
   return 0;
 }

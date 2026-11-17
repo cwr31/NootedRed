@@ -5,6 +5,7 @@
 #include <VP9PluginAllowlist.inc>
 #include <UserPatches.hpp>
 #include <NRed.hpp>
+#include <VDA.hpp>
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_util.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
@@ -52,8 +53,7 @@ void VP9LibraryValidation::processKext(KernelPatcher& patcher, const size_t inde
                                       const mach_vm_address_t address, const size_t size)
 {
     if (!enabled || index != kextAMFI.loadIndex ||
-        !UserPatches::singleton().mediaSupported() ||
-        NRed::singleton().getDeviceID() != 0x1636 || NRed::singleton().hasExternalVideo()) {
+        !VDA::singleton().canAdvertise()) {
         return;
     }
     // Both symbols verified in 25G332's BootKernelExtensions.kc.

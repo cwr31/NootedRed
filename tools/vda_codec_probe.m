@@ -3,6 +3,7 @@
 #import <VideoToolbox/VideoToolbox.h>
 #import <CommonCrypto/CommonDigest.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 
 // Public VideoToolbox APIs only. This is a correctness probe, not a throughput
@@ -168,15 +169,23 @@ int main(int argc, const char **argv) { @autoreleasepool {
         printf("asset_samples=%lu read_status=%ld\n",(unsigned long)samples.count,(long)reader.status);
         return decodeSamples(samples,argv[3],argc>4 ? (!strcmp(argv[4],"auto") ? 2 : !strcmp(argv[4],"10")) : 0);
     }
-    if (argc != 7 || strcmp(argv[1], "encode") ||
+    if (argc != 7 || (strcmp(argv[1], "encode") && strcmp(argv[1], "encode-only")) ||
         (strcmp(argv[2], "h264") && strcmp(argv[2], "hevc") && strcmp(argv[2], "hevc10"))) {
-        fprintf(stderr,"usage: probe encode h264|hevc|hevc10 W H N prefix | decode file prefix [10]\n");
+        fprintf(stderr,"usage: probe encode|encode-only h264|hevc|hevc10 W H N prefix | decode file prefix [10]\n");
         return 1;
     }
     bool tenbit = !strcmp(argv[2], "hevc10");
     CMVideoCodecType codec = !strcmp(argv[2],"h264") ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC;
     int w=atoi(argv[3]), h=atoi(argv[4]), n=atoi(argv[5]); const char *prefix=argv[6];
     if (w<16 || h<16 || w%2 || h%2 || n<1 || n>120) return 1;
+    // Square HEVC is a separate revision-9 test. Require its explicit gate so
+    // running an older generic regression cannot submit the known bad command.
+    bool squareHEVC = codec == kCMVideoCodecType_HEVC && w == 4096 && h == 4096 &&
+        getenv("NRED_PROBE_SQUARE_HEVC") && !strcmp(getenv("NRED_PROBE_SQUARE_HEVC"), "1");
+    if (w > 4096 || (h > (codec == kCMVideoCodecType_H264 ? 4096 : 2304) && !squareHEVC)) {
+        fprintf(stderr, "outside verified bridge encode bounds; no session created\n");
+        return 1;
+    }
     EncodeState state = {.samples=[NSMutableArray array]};
     NSDictionary *spec=@{(__bridge id)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder:@YES};
     OSType sourceFormat = tenbit ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange :
@@ -187,7 +196,7 @@ int main(int argc, const char **argv) { @autoreleasepool {
     OSStatus st=VTCompressionSessionCreate(NULL,w,h,codec,(__bridge CFDictionaryRef)spec,
         (__bridge CFDictionaryRef)attrs,NULL,encoded,&state,&session);
     printf("encode_create=%d size=%dx%d\n",(int)st,w,h); if(st) return 2;
-    NSDictionary *settings=@{
+    NSMutableDictionary *settings=[@{
         (__bridge id)kVTCompressionPropertyKey_ProfileLevel:(__bridge id)(
             codec == kCMVideoCodecType_H264 ? kVTProfileLevel_H264_High_AutoLevel :
             tenbit ? kVTProfileLevel_HEVC_Main10_AutoLevel : kVTProfileLevel_HEVC_Main_AutoLevel),
@@ -195,7 +204,18 @@ int main(int argc, const char **argv) { @autoreleasepool {
         (__bridge id)kVTCompressionPropertyKey_AllowFrameReordering:@NO,
         (__bridge id)kVTCompressionPropertyKey_AverageBitRate:@(w>=3000?20000000:6000000),
         (__bridge id)kVTCompressionPropertyKey_ExpectedFrameRate:@60
-    };
+    } mutableCopy];
+    NSString *extra = [[[NSProcessInfo processInfo] environment] objectForKey:@"NRED_PROBE_SETTINGS"];
+    if (extra) {
+        NSError *error = nil;
+        id overrides = [NSJSONSerialization JSONObjectWithData:[extra dataUsingEncoding:NSUTF8StringEncoding]
+                                                       options:0 error:&error];
+        if (![overrides isKindOfClass:[NSDictionary class]]) {
+            NSLog(@"invalid probe settings: %@", error);
+            VTCompressionSessionInvalidate(session); CFRelease(session); return 1;
+        }
+        [settings addEntriesFromDictionary:overrides];
+    }
     int settingErrors = 0;
     for (id key in settings) {
         st=VTSessionSetProperty(session,(__bridge CFStringRef)key,(__bridge CFTypeRef)settings[key]);
@@ -260,5 +280,8 @@ int main(int argc, const char **argv) { @autoreleasepool {
     if(!isHW || st || state.errors || state.samples.count!=n) return 2;
     NSString *path=[NSString stringWithFormat:@"%s.%s",prefix,codec==kCMVideoCodecType_H264?"h264":"hevc"];
     if(saveAnnexB(state.samples,codec,path.UTF8String)) return 2;
+    // Square AVC encoding can be verified by an independent CPU decoder even
+    // while square hardware decoding is unsupported. Do not conflate them.
+    if (!strcmp(argv[1], "encode-only")) return 0;
     return decodeSamples(state.samples,prefix,tenbit);
 } }

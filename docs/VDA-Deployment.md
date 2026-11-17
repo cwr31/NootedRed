@@ -25,11 +25,15 @@ tools/vda_preflight.sh
 
 The artifact is
 `build/branches/<branch>/macosx/x86_64/release/NootedRed.kext`.
-Preflight checks the current cache and both image UUIDs, all 18 required VA/GVA
-sites, eleven page fingerprints and the generated manifest. It submits no GPU work.
+`NRED_BUILD_BRANCH` selects the same sanitized branch directory for building,
+preflight and deployment. Preflight and deployment also accept `--kext` for
+an explicit candidate. They do not fall back to another branch or a stale
+shared/legacy build when the selected artifact is missing.
+Preflight checks the current cache and both image UUIDs, all 34 required VA/GVA
+sites, eighteen page fingerprints and the generated manifest. It submits no GPU work.
 
 `tools/media_patch_manifest.py` reads only image metadata, named VA functions,
-AppleGVA's bounded `__text`, and the eleven target pages. It never scans/maps the
+AppleGVA's bounded `__text`, and the eighteen target pages. It never scans/maps the
 entire cache. Site windows accept only their declared original or replacement;
 only those windows are zeroed for the page SHA-256. UUIDs are verified in preflight.
 Runtime pins the kernel Mach-O UUID before enabling media. `kern.osversion` can
@@ -38,7 +42,7 @@ Once populated, the build must also match or media is latched off. Runtime check
 the exact cache basename/file offset, every site's
 bytes and the masked whole-page SHA-256. No filesystem reads occur in pager hooks.
 
-The checked-in fingerprints were derived from live pages on 2026-11-16, with
+The checked-in fingerprints were derived from live pages on November 16–17, 2026, with
 the old kext active. They describe the observed bytes outside declared patch
 windows; they are **not independent stock-cache evidence**. The generator never
 silently reconstructs unknown bytes. For a new build, generate a candidate to a
@@ -65,6 +69,7 @@ its exact hash; rebuilding the plugin requires a new paired allowlist.
 ```sh
 tools/vda_selftest.sh
 VDA_TEST_PYTHON=/path/to/python-with-pyav-and-numpy tools/vda_hwtest.sh
+VDA_TEST_PYTHON=/path/to/python-with-pyav-and-numpy tools/vda_hwtest.sh --square-hevc --require-main10
 ```
 
 The diagnostic script does not report a hardware pass. The strict test compiles
@@ -84,6 +89,9 @@ The default matrix is 30 frames each:
   to fail before submitting GPU work if this feature is missing after reboot.
 
 The encoder uses its NV12 IOSurface pixel-buffer pool and actual row pitches.
+`--square-hevc` adds 4096×4096 HEVC Main and Main10 encode/decode cases and
+requires the active revision-9 18-page/34-site manifest before submitting any
+square work. The native probe also requires its explicit square-test gate.
 Independent PyAV/FFmpeg software decoding is compared with the hardware output
 over effective NV12/P010 pixels, excluding row padding. B frames are ordered by
 PTS; duplicate timestamps, dropped/missing frames, unexpected dimensions/format
@@ -134,12 +142,12 @@ Useful properties:
 
 | Property | Meaning |
 | --- | --- |
-| `NRedUserPatchRevision=4` | bounded page backend with the P010/Main10 encode fixes |
+| `NRedUserPatchRevision=9` | shared VCN 2.2 policy, initialized encoder records and square HEVC bitstream repair |
 | `NRedMediaKernelValidated=1` | exact kernel Mach-O UUID matched |
 | `NRedMediaPatchSupported=1` | exact build and page hook available |
-| `NRedMediaPatchPagesExpected=11` | required VA/GVA pages |
-| `NRedMediaPatchSitesExpected=18` | required sites |
-| `NRedHEVC10EncodeAdvertised=1` | validated Renoir Main10 encode capability published |
+| `NRedMediaPatchPagesExpected=18` | required VA/GVA pages |
+| `NRedMediaPatchSitesExpected=34` | required sites |
+| `NRedHEVC10EncodeAdvertised=1` | Main10 encode published after VCN 2.2 and exact driver/backend checks |
 | `NRedMediaPatchPagesObserved` | bitmask of validated page indices |
 | `NRedMediaPatchComplete=1` | every required page observed at least once |
 | `NRedVCNUserPatchesAllowed=1` | allocated bridge may patch media pages |
@@ -148,8 +156,9 @@ Useful properties:
 Main10 **encode and decode** passed bounded process-local hardware validation on
 Renoir 4750U / PCI `0x1636`, using this manifest's exact instruction replacements.
 The XML retains conservative Main-only encoding defaults. Runtime adds encode
-profile 2 and capability level `"2"` only for that device, the matching media
-backend/build and enabled HEVC/Main10 policy.
+profile 2 and capability level `"2"` for the four shared VCN 2.2 PCI IDs, the
+matching media backend/build and enabled HEVC/Main10 policy. Hardware validation
+remains specific to PCI `0x1636`; the other devices have policy validation only.
 
 The encode changes select P010 from the actual source texture's two-byte
 elements, set both input bit depth and packing, and signal zero per-slice chroma
@@ -160,6 +169,21 @@ Independent per-slice chroma QP deltas are not exposed by this compatibility
 path. Main10 support does not imply HDR metadata handling or 4K60 throughput
 acceptance. See `analysis/hevc-main10-20261116.md` for the evidence and test scope.
 
-The new EFI kext still requires a reboot and the public-API test afterward.
-Process-local tests do not prove that a newly built kext has loaded, that
-personality injection ran, or that every new page was patched at boot.
+The revision-9 EFI kext and paired VP9 plugin were installed and booted on the
+tested Renoir 4750U. IORegistry confirmed revision 9 and complete 18-page
+coverage. The 14-case public VideoToolbox matrix passed 30 frames per case,
+including square HEVC Main and Main10; 4096×4096 H.264 High encoding also
+passed 30 frames with independent CPU decoding. The square AVC hardware
+decoder remains blocked by the bundled firmware. These observations are
+specific to the tested machine and exact 25G332 cache identities.
+
+Revision 9 retains the initialized native VCN2 encoder rate/quality records
+and repairs the HEVC 4096×4096 output descriptor: the native 128 MiB
+allocation stays intact while the VCN firmware receives a 64 MiB circular
+ring length. The height gate now admits Main and Main10 square frames.
+Process-local hardware trials independently reconstructed both profiles
+and confirmed that 4096×2304 keeps its 72 MiB descriptor. See
+[the square repair report](../analysis/hevc-square-repair-20261117.md).
+AVC 4096×4096 hardware decoding remains blocked by the bundled firmware's
+16-bit macroblock-count overflow; see
+[the firmware proof](../analysis/avc-firmware-limit-20261117.md).

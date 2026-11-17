@@ -16,6 +16,7 @@
 #include "ac_vcn_vp9_default.h"
 #include "avd.h"
 #include "vp9msg.h"
+#include "../../../NootedRed/MediaHardware.h"
 
 int vcnvp9_debug = 0;
 int vcnvp9_gpu_armed = 0;
@@ -49,8 +50,8 @@ typedef struct {
   uint32_t pad1;              // +92
   void* bsinfo;               // +96  driver reads +0 buffer index, +16 size
   const VP9Parser* vp9;       // +104 ours
-  uint32_t mif_wrc_en;        // +112 ours: VCN3+, zero on Renoir's VCN2
-  uint32_t dpb_tier;          // +116 ours: explicit tier 1 on checked Renoir
+  uint32_t mif_wrc_en;        // +112 ours: VCN3+, zero on VCN 2.2
+  uint32_t dpb_tier;          // +116 ours: explicit tier 1 on VCN 2.2
   uint8_t reserved[144];
 } VP9Params;
 
@@ -633,19 +634,19 @@ VcnVP9* vcnvp9_create(uint32_t maxWidth, uint32_t maxHeight, char* err,
   if (!create) FAIL("no AVD_CreateAVDAccelerator");
   io_service_t svc = find_accelerator(&d->deviceID);
   if (!svc) FAIL("no AMD accelerator");
-  // Bring-up is limited to the local Renoir and the originally tested Navi21
-  // products. Never infer AV1 support from the AV1-shaped CPU-side carrier.
-  if (d->deviceID != 0x1636 && d->deviceID != 0x73bf &&
-      d->deviceID != 0x73af) {
+  // Classify the real PCI GPU by media IP. Same-IP APUs use the same protocol,
+  // while different generations retain their own layout and binary guards.
+  // The AV1-shaped CPU-side carrier does not imply AV1 hardware support.
+  if (!nredMediaVP9Supported(d->deviceID)) {
     IOObjectRelease(svc);
-    FAIL("GPU %04x is not validated for this VP9 prototype", d->deviceID);
+    FAIL("GPU %04x has no supported VP9 backend", d->deviceID);
   }
-  if (d->deviceID == 0x1636 &&
+  if (nredMediaUsesVCN2Bridge(d->deviceID) &&
       strcmp(uuid, "1181E2CA31B33DF090E23AE70552D753")) {
     IOObjectRelease(svc);
-    FAIL("Renoir bring-up requires the checked 25G332 driver");
+    FAIL("VCN 2.2 requires the checked 25G332 driver");
   }
-  d->mif_wrc_en = d->deviceID == 0x1636 ? 0 : 1;
+  d->mif_wrc_en = nredMediaVP9WriteCombine(d->deviceID);
   uint32_t services[8] = {svc};
   AVD_AcceleratorCreate ac = {
       .index = 0, .services = services, .validMask = 0xffffffff};
@@ -797,7 +798,7 @@ static int on_frame(void* vctx, VP9Parser* p, VP9ParseResult kind,
         return -1;
       }
   if (!vcnvp9_dimensions_supported(h->width, h->height) ||
-      (d->deviceID != 0x1636 &&
+      (nredMediaVP9DPBTier(d->deviceID) == 0 &&
        (uint64_t)h->width * h->height > VCN_VP9_TIER0_MAX_PIXELS) ||
       h->width > d->maxW || h->height > d->maxH) {
     snprintf(d->err, sizeof(d->err), "%ux%u is over the session maximum",
@@ -844,7 +845,7 @@ static int on_frame(void* vctx, VP9Parser* p, VP9ParseResult kind,
   prm.bsinfo = d->bsinfo;
   prm.vp9 = p;
   prm.mif_wrc_en = d->mif_wrc_en;
-  prm.dpb_tier = d->deviceID == 0x1636 ? 1 : 0;
+  prm.dpb_tier = nredMediaVP9DPBTier(d->deviceID);
   for (int i = 0; i < 8; i++)
     prm.ref_frame_map[i] = p->ref[i].valid && p->ref[i].dpb_slot >= 0
                                ? (uint32_t)p->ref[i].dpb_slot

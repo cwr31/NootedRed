@@ -10,6 +10,7 @@ from fractions import Fraction
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import plistlib
 import subprocess
@@ -19,9 +20,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run(command, log, timeout=120):
+def run(command, log, timeout=120, env=None):
     with log.open("w") as output:
-        result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=timeout)
+        result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=timeout, env=env)
     if result.returncode:
         raise ValueError(f"command exited {result.returncode}: {log}")
     return log.read_text()
@@ -145,6 +146,7 @@ def main():
     parser.add_argument("--frames", type=int, default=30)
     parser.add_argument("--require-manifest", action="store_true")
     parser.add_argument("--require-main10", action="store_true", help="fail before submitting work if Main10 encode is not advertised")
+    parser.add_argument("--square-hevc", action="store_true", help="test revision-9 4096x4096 Main/Main10 encoding and decoding")
     args = parser.parse_args()
     if sys.platform != "darwin":
         print("INCOMPLETE: macOS is required"); return 77
@@ -172,6 +174,12 @@ def main():
             raise ValueError(f"{key} is not 1; no GPU work submitted")
     if args.require_manifest and before.get("NRedMediaPatchSupported") != 1:
         raise ValueError("bounded media manifest not active; reboot with the matching kext first")
+    if args.square_hevc and (before.get("NRedUserPatchRevision") != 9 or
+                            before.get("NRedMediaPatchPagesExpected") != 18 or
+                            before.get("NRedMediaPatchSitesExpected") != 34 or
+                            before.get("NRedHEVC10EncodeAdvertised") != 1 or
+                            "-NRedNoHEVC" in bootargs or "-NRedNoHEVC10" in bootargs):
+        raise ValueError("square HEVC requires the active revision-9 manifest and Main10 policy; no GPU work submitted")
     if before.get("NRedVCNMediaFailure", 0):
         raise ValueError("media failure already latched; no GPU work submitted")
     report = {"bootargs": bootargs, "before": before, "cases": [], "skipped": [],
@@ -204,14 +212,20 @@ def main():
             report["skipped"].append("Main10 encode: not advertised by this boot")
     else:
         report["skipped"].append("Main10 encode/decode: disabled by boot policy")
+    if args.square_hevc:
+        cases.extend((f"hevc-{profile}-4096x4096", "hevc", 4096, 4096, bits, True)
+                     for profile, bits in (("main", 8), ("main10", 10)))
     for name, codec, width, height, bits, encoded in cases:
         row = {"case": name, "expected_frames": args.frames, "hardware_encode": encoded}
         try:
             prefix = work / name
             if encoded:
+                env = os.environ.copy()
+                if width == height == 4096 and codec == "hevc":
+                    env["NRED_PROBE_SQUARE_HEVC"] = "1"
                 log = run([str(binary), "encode", "hevc10" if bits == 10 else codec,
                            str(width), str(height), str(args.frames), str(prefix)],
-                          work / f"{name}.log")
+                          work / f"{name}.log", env=env)
                 source = work / f"{name}.{codec}"
                 if "encode_hardware=1 query_status=0" not in log:
                     raise ValueError("encoder did not confirm actual hardware selection")

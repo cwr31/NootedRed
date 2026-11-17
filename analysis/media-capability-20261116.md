@@ -1,8 +1,18 @@
 # Renoir AVC / HEVC / VP9 capability expansion
 
+**November 17 follow-up:** [Revision 8](media-revision8-20261117.md) records
+the current candidate, the verified encoder initialization repair, corrected
+test attribution and the remaining square-resolution limitations.
+
 Target: Ryzen 7 PRO 4750U, PCI `1002:1636`, VCN 2.2, macOS 26.7.2
 (`25G332`). These results describe tested driver behavior, not a guarantee
 of every feature or the peak frame rate of every video.
+
+Later on November 16: the 22:23:15 +08:00 reboot loaded revision 6.
+Revision 7's portability changes, subsequent public-API acceptance, and the
+22:19 HEVC experiment's GPU reset/watchdog incident are recorded in
+[media-portability-20261116.md](media-portability-20261116.md).
+The installation history below describes its earlier observation time.
 
 ## Code changes
 
@@ -143,8 +153,13 @@ This revision **does not claim complete hardware feature parity**.
    changes do not fix it. Legacy codec 0 also fails at 1080p. Native submitted
    message dimensions and buffer sizes do not show truncation. Feedback value
    at offset 20 differs (zero for blank output, one for correct output), but
-   that does not establish the precise firmware/hardware cause. The 65,536
-   macroblock corner remains unresolved; no speculative fix is shipped.
+   that feedback correlation alone does not establish its semantics.
+   **November 17 update:** the bundled firmware's codec-7 slice parser
+   demonstrably truncates 65,536 macroblocks to zero, rejects every slice
+   start and returns error 6. See
+   [avc-firmware-limit-20261117.md](avc-firmware-limit-20261117.md) for the
+   byte-derived proof and newer-firmware comparison. The cause is identified;
+   a safe firmware repair and square hardware decode are still not delivered.
 2. **Runtime AVC slice-count changes:** explicitly rejected after the first
    frame, as described above. The successful path is initial configuration.
 3. **Taller HEVC encoding:** isolated 4096x4096 AVC height testing passes

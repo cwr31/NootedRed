@@ -41,14 +41,23 @@ def main():
     if platform.system() != "Darwin" or platform.machine() != "x86_64":
         parser.error("this machine-code fixture requires x86_64 macOS")
     driver = args.host_driver.resolve()
-    image = driver.read_bytes()
+    image = bytearray(driver.read_bytes())
+    header = (ROOT / "NootedRed/GLResourceBudgetPatch.hpp").read_text()
+    original, patched = (patch_bytes(header, name) for name in ("Find", "Replace"))
+    # The running per-page backend can make file reads observe our patched
+    # page. Normalize only the reviewed 50-byte site, then require the SAME
+    # complete page fingerprints; never accept unrelated page differences.
+    site = 0x572A
+    if image[site:site + len(patched)] == patched:
+        image[site:site + len(original)] = original
     for offset, expected in REVIEWED_PAGES.items():
         actual = hashlib.sha256(image[offset:offset + 4096]).hexdigest()
         if actual != expected:
             parser.error(f"host driver page {offset:#x} differs from the reviewed fixture")
-    header = (ROOT / "NootedRed/GLResourceBudgetPatch.hpp").read_text()
     with tempfile.TemporaryDirectory(prefix="nred-gl-budget-") as directory:
         temp = Path(directory)
+        fixture = temp / "reviewed-driver"
+        fixture.write_bytes(image)
         arrays = ["#include <stdint.h>"]
         for source, target in (("Find", "budget_find"), ("Replace", "budget_replace")):
             values = ",".join(f"0x{value:02x}" for value in patch_bytes(header, source))
@@ -62,7 +71,7 @@ def main():
             str(ROOT / "tools/gl_resource_budget_replay.c"), "-o", str(binary),
         ], check=True)
         print("Reviewed CPU pages verified; using current production Find/Replace.", flush=True)
-        subprocess.run([str(binary), str(driver)], check=True)
+        subprocess.run([str(binary), str(fixture)], check=True)
 
 
 if __name__ == "__main__":

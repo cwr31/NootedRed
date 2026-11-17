@@ -100,7 +100,7 @@ namespace
     bool isSupportedDevice()
     {
         // The profile is the single source of truth for the target: a VCN 2.x device whose profile enables
-        // the engine (0x1638 is validated; the other VCN 2.x APUs are experimental) may use this bridge.  The
+        // the engine may use this bridge; individual device/build tests are recorded in analysis/. The
         // generated ABI guards and the exact build check remain the hard safety gates.
         const auto* const profile = DeviceProfile::current();
         return isSupportedBuild() && VDA::singleton().canAdvertise() && profile != nullptr

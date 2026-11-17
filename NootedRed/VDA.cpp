@@ -21,6 +21,7 @@
 // along with this work.  If not, see https://git.chefkiss.dev/ChefKiss/OpenKnowledge/raw/branch/master/LICENSE-v1.md.
 
 #include <DeviceProfile.hpp>
+#include <MediaHardware.h>
 #include <Headers/kern_util.hpp>
 #include <NRed.hpp>
 #include <VDA.hpp>
@@ -53,6 +54,7 @@ bool VDA::isSupported() const
     const auto* const profile = DeviceProfile::current();
     return this->enabled && profile != nullptr && profile->media.hasVCN0 &&
            profile->media.vcnGeneration == DeviceProfile::kVcn2_2 &&
+           nredMediaUsesVCN2Bridge(NRed::singleton().getDeviceID()) &&
            !NRed::singleton().hasExternalVideo() && UserPatches::singleton().mediaSupported();
 }
 
@@ -63,14 +65,12 @@ bool VDA::canAdvertise() const
 
 bool VDA::isHEVC10EncodeAllowed() const
 {
-    return this->isHEVC10Allowed() && this->canAdvertise() &&
-           NRed::singleton().getDeviceID() == 0x1636;
+    return this->isHEVC10Allowed() && this->canAdvertise();
 }
 
 bool VDA::isHEVC8KDecodeAllowed() const
 {
-    return this->isHEVCDecodeAllowed() && this->canAdvertise() &&
-           NRed::singleton().getDeviceID() == 0x1636;
+    return this->isHEVCDecodeAllowed() && this->canAdvertise();
 }
 
 void VDA::stripCapabilities(OSDictionary* const dictionary)
@@ -105,7 +105,7 @@ void VDA::init()
     }
     else {
         if (this->hevc10Allowed) {
-            DBGLOG("VDA", "Hardware video acceleration requested: AVC + HEVC; Main10 encode requires validated Renoir patches");
+            DBGLOG("VDA", "Hardware video acceleration requested: AVC + HEVC; Main10 encode requires VCN 2.2 and matching driver patches");
         } else {
             DBGLOG("VDA", "-NRedNoHEVC10 active: 10-bit HEVC encode/decode disabled");
         }

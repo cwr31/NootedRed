@@ -38,6 +38,7 @@ STUBS = r"""
 #include <vector>
 #include <CommonCrypto/CommonDigest.h>
 using UInt8 = uint8_t;
+using UInt16 = uint16_t;
 using UInt32 = uint32_t;
 using UInt64 = uint64_t;
 using SInt32 = int32_t;
@@ -48,6 +49,9 @@ namespace PenguinWizardry { using KernelVersion = int; }
 struct UserPatcher { enum FileSegment { SegmentTextText }; };
 constexpr int KERN_SUCCESS = 0;
 struct KernelPatcher { static inline int kernelWriteLock; };
+struct IOSimpleLock {};
+void IOSimpleLockLock(IOSimpleLock*) {}
+void IOSimpleLockUnlock(IOSimpleLock*) {}
 namespace MachInfo {
     bool rejectWrites = false;
     unsigned writes = 0, restores = 0;
@@ -121,7 +125,7 @@ bool replaced(const Page& p, const Sig& s, size_t offset) {
 }
 UserPatches graphics(const Sig* sigs) {
     UserPatches p;
-    p.signatures = sigs; p.signatureCount = 4; p.resolverEnabled = true;
+    p.signatures = sigs; p.signatureCount = 5; p.resolverEnabled = true;
     p.vdaEnabled = false;
     return p;
 }
@@ -153,7 +157,7 @@ void lifecycle(UserPatches& p, const Page& original, const char* vnode,
     }
 }
 void graphicsTests(const Sig* sigs, const char* table) {
-    for (size_t index = 0; index < 2; ++index) {
+    for (size_t index = 0; index < 3; ++index) {
         auto p = graphics(sigs);
         Page page{}; put(page, sigs[index], 0x100);
         lifecycle(p, page, "AMDRadeonX5000GLDriver", sigs[index], 0x100,
@@ -178,21 +182,21 @@ void graphicsTests(const Sig* sigs, const char* table) {
     }
     {
         auto p = graphics(sigs);
-        Page original{}; put(original, sigs[2], 0x100); put(original, sigs[3], 0x280);
+        Page original{}; put(original, sigs[3], 0x100); put(original, sigs[4], 0x280);
         for (int fault = 0; fault < 4; ++fault) {
             auto page = original;
             invoke(p, page, "dyld_shared_cache_x86_64h.03");
-            check(replaced(page, sigs[2], 0x100) && replaced(page, sigs[3], 0x280),
+            check(replaced(page, sigs[3], 0x100) && replaced(page, sigs[4], 0x280),
                   std::string(table) + " Metal pair fresh page");
             auto after = page; auto writes = MachInfo::writes;
             invoke(p, page, "dyld_shared_cache_x86_64h.03");
             check(page == after && writes == MachInfo::writes, "Metal pair repeated callback");
         }
-        auto absent = Page{}; put(absent, sigs[2], 0x100);
+        auto absent = Page{}; put(absent, sigs[3], 0x100);
         const auto before = absent;
         invoke(p, absent, "dyld_shared_cache_x86_64h.03");
         check(absent == before, "Metal pair rejects missing partner");
-        auto distant = Page{}; put(distant, sigs[2], 0x100); put(distant, sigs[3], 0x800);
+        auto distant = Page{}; put(distant, sigs[3], 0x100); put(distant, sigs[4], 0x800);
         const auto beforeDistant = distant;
         invoke(p, distant, "dyld_shared_cache_x86_64h.03");
         check(distant == beforeDistant, "Metal pair rejects distant partner");
@@ -202,7 +206,7 @@ void graphicsTests(const Sig* sigs, const char* table) {
         check(retry == original, "Metal pair write failure changes neither partner");
         MachInfo::rejectWrites = false;
         invoke(p, retry, "dyld_shared_cache_x86_64h.03");
-        check(replaced(retry,sigs[2],0x100) && replaced(retry,sigs[3],0x280), "Metal pair write retry");
+        check(replaced(retry,sigs[3],0x100) && replaced(retry,sigs[4],0x280), "Metal pair write retry");
     }
 }
 #ifndef NRED_HAS_MEDIA_MANIFEST
@@ -563,6 +567,9 @@ def main():
         methods += function(source, "void UserPatches::patchMediaPage(") + "\n"
     if "void UserPatches::tracePatch(" in source:
         methods += function(source, "void UserPatches::tracePatch(") + "\n"
+    if "void UserPatches::recordCachedSite(" in source:
+        methods += function(source, "void UserPatches::recordCachedSite(") + "\n"
+        methods += function(source, "void UserPatches::reapplyCachedSites(") + "\n"
     methods += function(source, "void UserPatches::patchSignaturePage(")
     with tempfile.TemporaryDirectory(prefix="nred-page-test-") as temp:
         unit, binary = Path(temp) / "test.cpp", Path(temp) / "test"

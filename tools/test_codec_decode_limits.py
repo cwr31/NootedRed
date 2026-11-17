@@ -56,9 +56,13 @@ def main():
     for codec, dimensions in (
         (0x800, ((64, 64), (1920, 1080), (3840, 2160), (4096, 2304),
                  (7680, 4320), (8192, 4320), (8192, 4352), (8193, 4352),
-                 (8192, 4353), (63, 1080), (1920, 63), (0, 0))),
+                 (8192, 4353), (63, 1080), (1920, 63), (0, 0),
+                 (65536, 65536), (0xFFFFFFFF, 1080), (1920, 0xFFFFFFFF))),
         (8, ((64, 64), (1920, 1080), (4096, 2304), (2304, 4096),
-             (4096, 4096), (4097, 2304), (4096, 4097), (7680, 4320), (63, 1080))),
+             (4096, 4096), (4097, 2304), (4096, 4097), (7680, 4320), (63, 1080),
+             (4096, 2305), (2305, 4096), (3072, 3072), (3072, 3073),
+             (4080, 4096), (4096, 4080), (4082, 4082),
+             (65536, 65536), (0xFFFFFFFF, 1080), (1920, 0xFFFFFFFF))),
     ):
         for internal in (0, 1):
             cap[0xB378] = internal
@@ -85,12 +89,18 @@ def main():
                             hex(codec), internal, width, height, mode, changed, actual)
                         assert before == (bytes(cap), bytes(info), bytes(context))
                         checks += 1
-    # AVC's independent encode-height field can grow without enabling the
-    # separate, unvalidated HEVC encode-height path or bypassing count/profile
-    # checks. Decode's conservative pixel budget remains unchanged.
+    # The isolated capability function does not reject the HEVC square
+    # geometry in this mock context even with its original instruction. The
+    # HEVC patch is independently checked against the pinned driver image,
+    # while actual square acceptance requires the hardware test. AVC's
+    # original height gate does reject tall frames here.
     for codec in (0x20, 0x1000):
         for width, height in ((1920, 1080), (4096, 2304), (2304, 4096),
-                              (4096, 4096), (4097, 2304), (4096, 4097)):
+                              (4096, 4096), (4097, 2304), (4096, 4097),
+                              (4096, 2305), (1920, 2305), (4096, 4080),
+                              (4080, 4096), (4082, 4082),
+                              (65536, 65536), (0xFFFFFFFF, 1080),
+                              (1920, 0xFFFFFFFF)):
             for mode in (4, 5):
                 for count in (0, 1):
                     struct.pack_into("<I", info, 0, 0x20)
@@ -99,7 +109,7 @@ def main():
                     struct.pack_into("<III", info, 0x18, count, 0, width)
                     struct.pack_into("<I", info, 0x24, height)
                     for function, changed in ((old, False), (new, True)):
-                        maximum = 4096 if changed and codec == 0x20 else 2304
+                        maximum = 4096 if changed or codec == 0x1000 else 2304
                         supported = mode == 4 and count == 1 and width <= 4096 and height <= maximum
                         before = bytes(cap), bytes(info), bytes(context)
                         actual = function(ctypes.addressof(cap), ctypes.addressof(context))

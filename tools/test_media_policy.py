@@ -19,6 +19,7 @@ STUBS = r"""
 #include <mutex>
 #include <string>
 #include <thread>
+#include "MediaHardware.h"
 using UInt8 = uint8_t;
 using UInt32 = uint32_t;
 using UInt64 = uint64_t;
@@ -104,9 +105,28 @@ int main() {
         check(!v.isHEVC10EncodeAllowed(), "each media/HEVC/Main10 boot opt-out blocks Main10 encode");
         *flag = true;
     }
-    NRed::singleton().device = 0x1638;
-    check(!v.isHEVC10EncodeAllowed(), "untested device retains Main-only encode");
-    check(!v.isHEVC8KDecodeAllowed(), "untested device retains conservative decode advertisement");
+    for (unsigned device : {0x1636, 0x1638, 0x164C, 0x15E7}) {
+        NRed::singleton().device = device;
+        check(v.isHEVC10EncodeAllowed(), "same VCN 2.2 IP enables Main10 with reviewed backend");
+        check(v.isHEVC8KDecodeAllowed(), "same VCN 2.2 IP enables bounded 8K with reviewed backend");
+        for (int blocked = 0; blocked < 4; ++blocked) {
+            UserPatches::singleton().supported = blocked != 0;
+            NRed::singleton().external = blocked == 1;
+            profile->media.hasVCN0 = blocked != 2;
+            profile->media.vcnGeneration = blocked == 3 ? 0x100 : DeviceProfile::kVcn2_2;
+            check(!v.isHEVC10EncodeAllowed() && !v.isHEVC8KDecodeAllowed(),
+                  "same-IP expansion cannot bypass backend, profile or external-GPU policy");
+        }
+        UserPatches::singleton().supported = true;
+        NRed::singleton().external = false;
+        profile->media.hasVCN0 = true;
+        profile->media.vcnGeneration = DeviceProfile::kVcn2_2;
+    }
+    for (unsigned device : {0, 0x15DD, 0x15D8, 0x73BF, 0x73AF, 0xFFFF, 0x11636}) {
+        NRed::singleton().device = device;
+        check(!v.canAdvertise() && !v.isHEVC10EncodeAllowed() && !v.isHEVC8KDecodeAllowed(),
+              "unsupported IP cannot use the bridge even with a stale VCN2 profile");
+    }
     NRed::singleton().device = 0x1636;
     v.enabled = false;
     check(!v.canAdvertise(), "NoVDA withdraws capabilities");
@@ -200,7 +220,8 @@ VCNBridge& VCNBridge::singleton() { static VCNBridge b; return b; }
         unit, binary = Path(directory) / "test.cpp", Path(directory) / "test"
         unit.write_text(STUBS + headers + keys + methods + TESTS)
         subprocess.run(["xcrun", "clang++", "-std=c++17", "-O1", "-g", "-fsanitize=address,undefined",
-                        "-fno-omit-frame-pointer", str(unit), "-o", str(binary)], check=True)
+                        "-fno-omit-frame-pointer", "-I", str(ROOT / "NootedRed"),
+                        str(unit), "-o", str(binary)], check=True)
         subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True)
         return subprocess.run([str(binary)]).returncode
 

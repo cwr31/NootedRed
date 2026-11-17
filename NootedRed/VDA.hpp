@@ -53,8 +53,8 @@ public:
     // Does not require an allocated engine; personality injection happens first.
     bool isSupported() const;
     bool canAdvertise() const;
-    // Main10 encode additionally requires the tested Renoir device and the
-    // exact manifest containing the P010/header fixes. Boot opt-outs apply.
+    // Main10 encode requires the VCN 2.2 bridge and the exact manifest
+    // containing the P010/header fixes. Boot opt-outs apply.
     bool isHEVC10EncodeAllowed() const;
     // 8K decode requires the matching bounded resolution-check manifest.
     bool isHEVC8KDecodeAllowed() const;

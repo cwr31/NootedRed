@@ -25,6 +25,7 @@
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_util.hpp>
 #include <DeviceProfile.hpp>
+#include <MediaHardware.h>
 #include <GLResourceBudgetPatch.hpp>
 #include <NRed.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
@@ -496,7 +497,7 @@ void UserPatches::processPatcher(KernelPatcher& patcher)
     }
     this->vp9RegistryEnabled = this->vp9RegistryEnabled && vdaAllowed
                                && getKernelVersion() == KernelVersion::Tahoe
-                               && NRed::singleton().getDeviceID() == 0x1636;
+                               && nredMediaUsesVCN2Bridge(NRed::singleton().getDeviceID());
     NRed::singleton().setProp32("NRedVP9RegistryEnabled", this->vp9RegistryEnabled ? 1 : 0);
     if (this->vp9RegistryEnabled) {
         SYSLOG("UserPatch", "Optional VP9 registry policy: allowing decoder cdhash %s", VP9PluginAllowlist::CDHash);
@@ -545,8 +546,8 @@ auto UserPatches::installNativePagePatcher(KernelPatcher& patcher) -> bool
         patcher.clearError();
     }
 
-    NRed::singleton().setProp32("NRedUserPatchRevision", 6);
-    SYSLOG("UserPatch", "Installed per-page backend (revision 6, AVC encode height/slices and VP9 tier-1 pair, trace %s)",
+    NRed::singleton().setProp32("NRedUserPatchRevision", 9);
+    SYSLOG("UserPatch", "Installed per-page backend (revision 9, VCN 2.2 media policy, HEVC bitstream repair and paired VP9, trace %s)",
            this->traceEnabled ? "first 128 writes" : "off");
     return true;
 }
@@ -637,6 +638,12 @@ void UserPatches::recordCachedSite(const VnodeKind vnodeKind, const UInt64 pageO
 
 void UserPatches::reapplyCachedSites(const VnodeKind vnodeKind, const UInt64 pageOffset, const UInt8* const bytes)
 {
+    // Cached offsets are hints, not authority to modify a newly validated page.
+    // In particular, the Metal gate and allow sites must be checked together by
+    // the regular resolver below.
+    if (vnodeKind != kVnodeGLDriver || !this->resolverEnabled || this->signatures == nullptr) {
+        return;
+    }
     const size_t count = static_cast<size_t>(__atomic_load_n(&this->cachedSiteCount, __ATOMIC_ACQUIRE));
     for (size_t i = 0; i < count; ++i) {
         const auto& site = this->cachedSites[i];
@@ -649,6 +656,20 @@ void UserPatches::reapplyCachedSites(const VnodeKind vnodeKind, const UInt64 pag
         if (memcmp(bytes + site.inPageOffset, site.find, site.size) != 0) {
             continue;
         }
+        bool contextMatches = false;
+        for (size_t index = 0; index < 3 && index < this->signatureCount; ++index) {
+            const auto& signature = this->signatures[index];
+            if (signature.find != site.find || signature.replace != site.replace ||
+                signature.replaceSize != site.size ||
+                (signature.pageOffset != ~static_cast<UInt64>(0) && signature.pageOffset != pageOffset)) {
+                continue;
+            }
+            size_t matchOffset = 0;
+            contextMatches = matchSignature(bytes, signature, matchOffset) &&
+                             matchOffset + signature.patchOffset == site.inPageOffset;
+            if (contextMatches) { break; }
+        }
+        if (!contextMatches) { continue; }
 
         if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) {
             SYSLOG("UserPatch", "Resolver: failed to disable kernel write protection (re-apply)");
@@ -801,7 +822,8 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
     }
 
     // VA/GVA and VP9 pages have their own full-page validation and reapply
-    // on every clean fault. The cache is for the GL/Metal signature sites.
+    // on every clean fault. GL cache hits still require a full signature match;
+    // Metal gate/allow pairs are checked together in the regular resolver.
     this->reapplyCachedSites(isGLDriver ? kVnodeGLDriver : kVnodeSharedCache, pageOffset, bytes);
 
     if (!this->resolverEnabled || this->signatures == nullptr || this->signatureCount == 0) {
@@ -869,8 +891,6 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
                     for (size_t off = 0; off + sizeof(kGLDriverHwInfoFind) <= kPageSize; ++off) {
                         if (memcmp(bytes + off, kGLDriverHwInfoFind, sizeof(kGLDriverHwInfoFind)) == 0) {
                             memcpy(const_cast<UInt8*>(bytes) + off, kGLDriverHwInfoReplace, sizeof(kGLDriverHwInfoReplace));
-                            this->recordCachedSite(kVnodeSharedCache, pageOffset, off, kGLDriverHwInfoFind,
-                                                   kGLDriverHwInfoReplace, sizeof(kGLDriverHwInfoReplace));
                             replacedCount++;
                         }
                     }
@@ -911,10 +931,6 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
 
                             MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
 
-                            this->recordCachedSite(kVnodeSharedCache, pageOffset, gateMatch + gateSig.patchOffset,
-                                                   gateSig.find, gateSig.replace, gateSig.replaceSize);
-                            this->recordCachedSite(kVnodeSharedCache, pageOffset, allowMatch + allowSig.patchOffset,
-                                                   allowSig.find, allowSig.replace, allowSig.replaceSize);
                             this->tracePatch("Metal Gate", 3, pageOffset, gateMatch + gateSig.patchOffset);
                             this->tracePatch("Metal Allow", 4, pageOffset, allowMatch + allowSig.patchOffset);
 

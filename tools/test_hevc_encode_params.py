@@ -15,7 +15,10 @@ from media_patch_manifest import HEVC_ENCODE_SITES
 def main():
     with DyldCache(DEFAULT_CACHE_DIR) as cache:
         image = MachOImage(cache, VA_IMAGE_PATH)
-        caller, format_site, *chroma_sites = HEVC_ENCODE_SITES
+        caller = next(site for site in HEVC_ENCODE_SITES if "EncodePicture" in site[0])
+        format_site = next(site for site in HEVC_ENCODE_SITES if "setInputAndOutputFormatParams" in site[0])
+        chroma_sites = [site for site in HEVC_ENCODE_SITES if "encodeSliceHeader" in site[0]]
+        assert len(chroma_sites) == 2
         for symbol, offset, find, replace in HEVC_ENCODE_SITES:
             at = image.symbol(symbol) + offset
             assert cache.read(at, len(bytes.fromhex(find))) in (bytes.fromhex(find), bytes.fromhex(replace))

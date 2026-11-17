@@ -187,7 +187,7 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
                     // - If !isHEVC10Allowed() (-NRedNoHEVC10): retain the existing Main-only policy.
                     //   It removes Main10 (profile 2) and Main Still Picture (profile 3);
                     //   profile 3 itself is 8-bit, not a second 10-bit profile.
-                    // - Default: Main/Main10; the reviewed Renoir manifest also enables Level 6.2.
+                    // - Default: Main/Main10; the reviewed VCN 2.2 manifest also enables Level 6.2.
                     if (!VDA::singleton().isHEVCDecodeAllowed()) {
                         for (UInt32 i = 0; i < count; ++i) {
                             auto* const pDict = OSDynamicCast(OSDictionary, driver.personalities->getObject(i));
@@ -247,7 +247,7 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
                     // 2. HEVC Encode policy:
                     // - If !isHEVCEncodeAllowed() (-NRedNoHEVC): strip IOGVAHEVCEncode and IOGVAHEVCEncodeCapabilities.
                     // - Main10: exact build/device/backend + all four encode fixes.
-                    // - Other supported devices or -NRedNoHEVC10: keep 8-bit Main.
+                    // - With -NRedNoHEVC10: keep 8-bit Main.
                     if (!VDA::singleton().isHEVCEncodeAllowed()) {
                         for (UInt32 i = 0; i < count; ++i) {
                             auto* const pDict = OSDynamicCast(OSDictionary, driver.personalities->getObject(i));

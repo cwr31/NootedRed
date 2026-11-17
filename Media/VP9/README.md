@@ -1,9 +1,11 @@
-# Experimental VP9 decoding on Renoir
+# Experimental VP9 decoding on VCN 2.2
 
-This directory contains an optional VideoToolbox VP9 decoder adapted for the
-Ryzen 7 PRO 4750U's Renoir GPU (`1002:1636`, VCN 2). It is paired with NootedRed's
-`-NRedVP9` option. It does not provide AV1 decoding: Renoir has no AV1 fixed
-function decoder.
+This directory contains an optional VideoToolbox VP9 decoder using the shared
+PCI/media-IP policy in `NootedRed/MediaHardware.h`. The NootedRed bridge covers
+`1636`, `1638`, `164C` and `15E7` (VCN 2.2); hardware testing in this fork is on
+the Ryzen 7 PRO 4750U / `1002:1636`. Other same-IP devices remain experimental.
+It is paired with NootedRed's `-NRedVP9` option. VCN 1.x and unknown GPUs remain
+disabled; no AV1 decoder or VP9 encoder is added.
 
 The decoder is adapted from `wh0ami7/vcn-video-decoders` at
 `c7ed7ea687971759321559b6cdff8ba0319fea15` (November 14, 2026). The upstream
@@ -16,21 +18,24 @@ The CPU parses VP9 headers and prepares VCN messages. Actual image decoding runs
 on the VCN engine. The Apple driver's CPU-side AV1 processor object is a carrier;
 the submitted session and codec messages are VP9, not AV1.
 
-Renoir requires `mif_wrc_en = 0`; the original Navi 21 implementation used 1.
-Mesa's `ac_vcn_dec.c` sets that field only for VCN 3 and newer. The Renoir path
+VCN 2.2 requires `mif_wrc_en = 0`; the original Navi 21 implementation used 1.
+Mesa's `ac_vcn_dec.c` sets that field only for VCN 3 and newer. The VCN 2.2 path
 also requires the validated AMDRadeonVADriver2 UUID
 `1181E2CA-31B3-3DF0-90E2-3AE70552D753`. A different driver is rejected.
 
 Profiles 0 and 2, 4:2:0, 8/10-bit, are accepted up to 8192 pixels wide,
 4352 pixels high, and **35,651,584 pixels per frame**, including 8192x4352.
-Renoir uses a VCN tier-1 dynamic-DPB descriptor to give the firmware explicit
+VCN 2.2 uses a tier-1 dynamic-DPB descriptor to give the firmware explicit
 reference-plane pitches, heights and sizes. Increasing the allocation alone
 left inter-frame chroma wrong in the implicit tier-0 path. The fixed nine-picture
 store uses 459 MiB for eight-bit references or 688.5 MiB for ten-bit references,
 and does not reallocate when coded resolution changes.
 See the [capability audit](../../analysis/media-capability-20261116.md).
 This DPB is separate from the GL resource-list budget correction. Navi retains
-the preceding tier-0 pixel guard because this new layout is tested on Renoir.
+the preceding tier-0 pixel guard. The policy and actual message builder are
+tested for all four bridge IDs and both original Navi IDs (`73BF`, `73AF`);
+host tests do not replace hardware tests on those machines.
+See the [portability and reboot investigation](../../analysis/media-portability-20261116.md).
 
 The parser also excludes a preceding keyframe from motion-vector reuse, as
 libvpx does. A keyframe's `intra_only` syntax bit alone cannot express this.
@@ -44,6 +49,8 @@ zsh Media/VP9/build.sh
 python3 Media/VP9/test_policy.py
 python3 Media/VP9/test_library_validation.py
 python3 Media/VP9/test_message.py
+python3 tools/test_media_hardware.py
+python3 tools/test_media_policy.py
 python3 tools/test_userpatch_lifecycle.py
 tools/build-branch.sh -y
 ```
@@ -56,7 +63,9 @@ the kext and plugin together whenever the plugin changes.
 
 The plugin belongs at `/Library/Video/Plug-Ins/VP9VCNDecoder.bundle`. Add
 `-NRedVP9` to OpenCore's boot arguments and use the matching NootedRed build.
-This option defaults off and targets Renoir `1636` on Tahoe only.
+This option defaults off and targets the four VCN 2.2 bridge IDs on the exact
+reviewed Tahoe build. Kernel, cache, driver UUID, page and paired-plugin hash
+checks still apply; a shared hardware generation does not bypass them.
 
 Two checks allow just the paired plugin:
 

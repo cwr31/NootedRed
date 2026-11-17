@@ -16,6 +16,7 @@ import struct
 import uuid
 
 from gen_vda_va_data import DEFAULT_CACHE_DIR, DyldCache, MachOImage, VA_IMAGE_PATH
+from hevc_bitstream_patch import BUILDER, PACKET_WRITER, patches as hevc_bitstream_patches
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "NootedRed/MediaPatchManifest.json"
@@ -42,9 +43,29 @@ SITES = [
     ("SourcePitch_Modern", "SourcePitch_Modern", 0, "__ZN11Vcn2Encoder15setEncodeParamsEPvP15VAVendorTexture"),
 ]
 
+# The native VCN2 constructor clears [0x38,0x80) and [0xdc,0x5c4), but leaves
+# the four rate-control/quality parameter records in [0x80,0xdc) uninitialized.
+# In particular, HEVC SetConfigParam(16) and checkRateControlPerPicUpdate read
+# the existing per-picture packet and preserve its filler-data word. Extend
+# the existing bzero down to 0x80, keeping its end at 0x5c4. Explicit parameter
+# setters still run afterwards. This is independent of the HEVC height hang.
+ENCODER_INIT_SITES = [
+    ("__ZN14Vcn2EncCommandC2Ev", 0x18,
+     "488dbbdc000000", "488dbb80000000"),
+    ("__ZN14Vcn2EncCommandC2Ev", 0x35,
+     "bee8040000", "be44050000"),
+]
+
 # Exact instruction windows for the reviewed 25G332 VCN2 encoder. These are
 # additional required sites, not a fallback signature search on another build.
 HEVC_ENCODE_SITES = [
+    # The VCN2.2 square frame succeeds with the native 128 MiB allocation
+    # when firmware sees a 64 MiB circular descriptor. The HEVC-only builder
+    # call below applies that exact, temporary adjustment. See
+    # analysis/hevc-square-repair-20261117.md. The separate height gate can
+    # therefore admit the independently checked 4096x4096 Main/Main10 cases.
+    ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0x1DF,
+     "448b9b5cb30000", "41bb0010000090"),
     # Pass the actual source texture to the format builder. The old second
     # argument was an unused command-info pointer; the context can remain NV12
     # even when the source texture is P010.
@@ -84,15 +105,17 @@ HEVC_DECODE_SITES = [
 ]
 AVC_DECODE_SITES = [
     # Allow portrait AVC while retaining the native Level-5.2 pixel budget.
-    # A 4096x4096 Level-6 stream returns blank frames with this firmware, so
-    # the generic Linux maximum rectangle must not override the pixel check.
+    # The codec-7 firmware stores the 256*256 macroblock count in u16, then
+    # rejects every slice against the wrapped zero count. See
+    # analysis/avc-firmware-limit-20261117.md; a larger pixel budget alone
+    # would also admit cropped sizes whose coded macroblocks still overflow.
     ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0xA7,
      "448bbb14b30000", "41bf0010000090"),
 ]
 AVC_ENCODE_SITES = [
     # The AVC encoder height table retains 2304 despite working 4096x4096
     # Baseline/Main/High output. Preserve its width/profile checks. HEVC's
-    # separate +0xB35C height field is deliberately not changed.
+    # separate +0xB35C height field is changed above with its packet fix.
     ("__ZN13AvdCapability19checkCapabilityListEPK21AVD_DriverContextInfo", 0x14D,
      "448b9b54b30000", "41bb0010000090"),
 ]
@@ -121,9 +144,10 @@ GVA_ENCODE_SITES = [
      "498d96d80501006a065e4c89ffe879b1060041c6862a18010001e90f0e000074b8"
      "498b4650488b80a80300004885c074068378380075a28b03418986680e0100e9e90d0000"),
 ]
-REQUIRED_SITES = (14 + len(HEVC_ENCODE_SITES) + len(HEVC_DECODE_SITES) +
+HEVC_PACKET_SITE_COUNT = 6  # HEVC builder call plus five executable alignment gaps.
+REQUIRED_SITES = (14 + len(HEVC_ENCODE_SITES) + HEVC_PACKET_SITE_COUNT + len(HEVC_DECODE_SITES) +
                   len(AVC_DECODE_SITES) + len(AVC_ENCODE_SITES) +
-                  len(GVA_ENCODE_SITES))
+                  len(GVA_ENCODE_SITES) + len(ENCODER_INIT_SITES))
 
 
 def arrays():
@@ -201,7 +225,7 @@ def collect(cache_dir, build, dump_pages=None, kernel=Path("/System/Library/Kern
             sites.append((function + candidates[0], find, replace, symbol))
         for symbol, offset, find_hex, replace_hex in (
                 HEVC_ENCODE_SITES + HEVC_DECODE_SITES +
-                AVC_DECODE_SITES + AVC_ENCODE_SITES):
+                AVC_DECODE_SITES + AVC_ENCODE_SITES + ENCODER_INIT_SITES):
             function = va.symbol(symbol)
             find, replace = bytes.fromhex(find_hex), bytes.fromhex(replace_hex)
             address = function + offset
@@ -209,6 +233,18 @@ def collect(cache_dir, build, dump_pages=None, kernel=Path("/System/Library/Kern
                     cache.read(address, len(find)) not in (find, replace)):
                 raise ValueError(f"{symbol}+{offset:#x}: reviewed VA window differs")
             sites.append((address, find, replace, symbol))
+        packet_sites = hevc_bitstream_patches(va.symbol(BUILDER), va.symbol(PACKET_WRITER))
+        if len(packet_sites) != HEVC_PACKET_SITE_COUNT:
+            raise ValueError("incomplete HEVC bitstream call/helper site set")
+        for index, (address, find, replace) in enumerate(packet_sites):
+            if (len(find) != len(replace) or
+                    cache.read(address, len(find)) not in (find, replace)):
+                raise ValueError(f"HEVC bitstream site {index}: reviewed VA window differs")
+            if index and not (va.text[2] <= address and
+                              address + len(find) <= va.text[2] + va.text[3]):
+                raise ValueError(f"HEVC bitstream helper {index} outside executable text")
+            sites.append((address, find, replace,
+                          f"VCN2_HEVC_BITSTREAM_{'CALL' if index == 0 else 'HELPER_'+str(index)}"))
         # AppleGVA has stripped local symbols. Require exactly one guarded
         # selection branch inside its bounded __text section.
         suffix = "Tahoe"

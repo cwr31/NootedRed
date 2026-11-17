@@ -2,6 +2,18 @@
 # Read-only build/device/cache preflight. No VideoToolbox calls or EFI writes.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+KEXT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --kext)
+            [[ $# -ge 2 && -n "$2" ]] || { echo "missing --kext path" >&2; exit 1; }
+            KEXT="$2"; shift 2 ;;
+        *) echo "usage: tools/vda_preflight.sh [--kext /path/to/NootedRed.kext]" >&2; exit 1 ;;
+    esac
+done
+if [[ -z "${KEXT}" ]]; then
+    KEXT="$(sh "${ROOT}/tools/release_kext_path.sh")"
+fi
 echo "macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)), Darwin $(uname -r)"
 echo "CPU: $(sysctl -n machdep.cpu.brand_string)"
 python3 "${ROOT}/tools/media_patch_manifest.py"
@@ -21,13 +33,10 @@ if grep -q 'com.apple.kext.AMDRadeonX6000 ' <<<"${LOADED_KEXTS}"; then
         echo "FAIL X6000 already loaded without a ready bridge; investigate the dGPU/driver owner"; exit 1
     fi
 fi
-BRANCH="$(git -C "${ROOT}" branch --show-current)"
-if [[ -z "${BRANCH}" ]]; then BRANCH="detached-$(git -C "${ROOT}" rev-parse --short HEAD)"; fi
-BRANCH="$(printf '%s' "${BRANCH}" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
-KEXT="${ROOT}/build/branches/${BRANCH}/macosx/x86_64/release/NootedRed.kext"
 if [[ ! -s "${KEXT}/Contents/MacOS/NootedRed" ]]; then
-    echo "FAIL missing current branch release kext: ${KEXT}"; exit 1
+    echo "FAIL missing selected release kext: ${KEXT}"; exit 1
 fi
+echo "source kext: ${KEXT}"
 plutil -lint "${KEXT}/Contents/Info.plist"
 shasum -a 256 "${KEXT}/Contents/MacOS/NootedRed"
 echo "boot-args: $(sysctl -n kern.bootargs)"

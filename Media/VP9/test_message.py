@@ -11,6 +11,7 @@ def main():
         binary = Path(directory) / "test"
         subprocess.run([
             "/usr/bin/clang", "-arch", "x86_64", "-O1", "-fno-strict-aliasing",
+            "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
             "-Wno-deprecated-declarations", "-Wno-four-char-constants",
             str(source / "test_message.c"), str(source / "vcnvp9/vp9parse.c"),
             "-framework", "CoreFoundation", "-framework", "CoreMedia",

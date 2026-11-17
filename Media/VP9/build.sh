@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build the optional Renoir VP9 plugin and its diagnostic harness.
+# Build the optional VCN VP9 plugin and its diagnostic harness.
 # All products go under the repository's ignored build/ directory.
 set -eu
 cd "${0:A:h}"
