@@ -63,6 +63,12 @@ bool VDA::canAdvertise() const
     return this->isSupported() && !VCNBridge::singleton().hasMediaFailed();
 }
 
+bool VDA::shouldStripCapabilities() const
+{
+    return !this->enabled ||
+           (nredMediaUsesVCN2Bridge(NRed::singleton().getDeviceID()) && !this->canAdvertise());
+}
+
 bool VDA::isHEVC10EncodeAllowed() const
 {
     return this->isHEVC10Allowed() && this->canAdvertise();

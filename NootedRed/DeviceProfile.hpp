@@ -98,7 +98,8 @@ public:
     struct MediaPolicy
     {
         // Media engine enablement flags.  The VCN 2.x profiles enable VCN0 so the same VDA implementation
-        // can be tried on every VCN 2.x APU (0x1638 is hardware-validated, the others are experimental).
+        // can be tried on every VCN 2.2 APU. Hardware media acceptance was
+        // measured on 0x1636; the other IDs remain experimental.
         // VCN 1.x profiles keep the engine disabled because the X6000 VCN2 bridge cannot serve them.
         bool hasUVD0{false};
         bool hasVCE{false};

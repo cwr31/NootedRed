@@ -183,7 +183,7 @@ namespace
     static_assert(onlyVcn2ProfilesEnableMedia(kProfiles),
                   "Media enablement is limited to VCN 2.x profiles until a VCN 1.x path exists");
     static_assert(profileEnablesMedia(kProfiles, 0x1638),
-                  "The hardware-validated 0x1638 profile must keep VCN0 enabled");
+                  "The VCN 2.2 0x1638 profile must keep VCN0 enabled");
     static_assert(allVcnDataPresent(kProfiles),
                   "Every profile needs VCN data, H.264/HEVC decode and no AV1 before media can be enabled");
     static_assert(mediaDisabled(kFallbackProfile.media), "The fallback profile must not enable any media engine");

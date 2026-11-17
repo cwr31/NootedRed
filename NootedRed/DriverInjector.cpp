@@ -171,9 +171,10 @@ bool DriverInjector::wrapAddDrivers(void* const self, OSArray* const array, cons
                 NRed::singleton().setProp32("NRedHEVC10EncodeAdvertised", 0);
                 NRed::singleton().setProp32("NRedHEVC8KDecodeAdvertised", 0);
 
-                // Do not advertise the bridge on unsupported builds/devices or after a failure.
-                // Engine allocation is deliberately not required here: it occurs after injection.
-                if (!VDA::singleton().canAdvertise()) {
+                // Preserve upstream personality behavior on VCN 1.x. For a
+                // VCN 2.2 target, reject codec claims if the pinned backend
+                // cannot run. Engine allocation occurs after injection.
+                if (VDA::singleton().shouldStripCapabilities()) {
                     for (UInt32 i = 0; i < count; ++i) {
                         auto* const pDict = OSDynamicCast(OSDictionary, driver.personalities->getObject(i));
                         VDA::stripCapabilities(pDict);

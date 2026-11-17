@@ -53,6 +53,10 @@ public:
     // Does not require an allocated engine; personality injection happens first.
     bool isSupported() const;
     bool canAdvertise() const;
+    // Preserve the original personality on VCN 1.x/other devices. Only a
+    // requested VCN 2.2 bridge needs its codec properties withheld when the
+    // exact backend/build checks reject it.
+    bool shouldStripCapabilities() const;
     // Main10 encode requires the VCN 2.2 bridge and the exact manifest
     // containing the P010/header fixes. Boot opt-outs apply.
     bool isHEVC10EncodeAllowed() const;

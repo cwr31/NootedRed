@@ -107,6 +107,7 @@ int main() {
     }
     for (unsigned device : {0x1636, 0x1638, 0x164C, 0x15E7}) {
         NRed::singleton().device = device;
+        check(!v.shouldStripCapabilities(), "accepted VCN 2.2 target keeps codec properties");
         check(v.isHEVC10EncodeAllowed(), "same VCN 2.2 IP enables Main10 with reviewed backend");
         check(v.isHEVC8KDecodeAllowed(), "same VCN 2.2 IP enables bounded 8K with reviewed backend");
         for (int blocked = 0; blocked < 4; ++blocked) {
@@ -116,6 +117,7 @@ int main() {
             profile->media.vcnGeneration = blocked == 3 ? 0x100 : DeviceProfile::kVcn2_2;
             check(!v.isHEVC10EncodeAllowed() && !v.isHEVC8KDecodeAllowed(),
                   "same-IP expansion cannot bypass backend, profile or external-GPU policy");
+            check(v.shouldStripCapabilities(), "rejected VCN 2.2 target withholds codec properties");
         }
         UserPatches::singleton().supported = true;
         NRed::singleton().external = false;
@@ -126,10 +128,16 @@ int main() {
         NRed::singleton().device = device;
         check(!v.canAdvertise() && !v.isHEVC10EncodeAllowed() && !v.isHEVC8KDecodeAllowed(),
               "unsupported IP cannot use the bridge even with a stale VCN2 profile");
+        check(!v.shouldStripCapabilities(), "other GPUs retain upstream default personality");
     }
     NRed::singleton().device = 0x1636;
     v.enabled = false;
     check(!v.canAdvertise(), "NoVDA withdraws capabilities");
+    for (unsigned device : {0x1636, 0x15DD, 0x15D8, 0xFFFF}) {
+        NRed::singleton().device = device;
+        check(v.shouldStripCapabilities(), "explicit NoVDA strips codec properties on every device");
+    }
+    NRed::singleton().device = 0x1636;
     v.enabled = true;
     for (int blocked = 0; blocked < 4; ++blocked) {
         UserPatches::singleton().supported = blocked != 0;
@@ -210,7 +218,7 @@ VDA& VDA::singleton() { static VDA v; return v; }
 VCNBridge& VCNBridge::singleton() { static VCNBridge b; return b; }
 """
     for marker in ("bool VDA::isSupported(", "bool VDA::canAdvertise(", "bool VDA::isHEVC10EncodeAllowed(",
-                   "bool VDA::isHEVC8KDecodeAllowed(",
+                   "bool VDA::isHEVC8KDecodeAllowed(", "bool VDA::shouldStripCapabilities(",
                    "void VDA::stripCapabilities(", "void VDA::withdrawCapabilities("):
         methods += function(va, marker) + "\n"
     for marker in ("bool VCNBridge::loadReady(", "void VCNBridge::setAccelerator(",
