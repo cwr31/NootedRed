@@ -106,7 +106,99 @@ namespace
     static const UInt8 kMTLAllowFind_Tahoe[]    = {0x0F, 0x94, 0xC1};
     static const UInt8 kMTLAllowReplace_Tahoe[] = {0xB1, 0x01, 0x90};
 
+    // OpenCL Kernel Dispatch patches (macOS 13 - 26)
+    // Intercepts _gldExecuteKernel in AMDRadeonX5000GLDriver:
+    // 1. When local_work_size == NULL (auto-calculator), clamps max threads per group to 64
+    //    (1 wavefront/workgroup), preventing SPI scratch wave hang and improving CU occupancy
+    //    on single-SE Renoir/Cezanne APUs.
+    // 2. When local_work_size != NULL with local_work_size[0] > 64, redirects to auto-calculator
+    //    ONLY for kernels with private_mem_size (0x59c) > 0, preserving explicit workgroup
+    //    geometry for zero-scratch kernels (e.g. Background Blur).
+    static const UInt8 kOpenCLDispatchFind_Sequoia[] = {
+        0x48, 0x85, 0xDB, 0x4C, 0x89, 0xBD, 0x58, 0xFE, 0xFF, 0xFF, 0x74, 0x2F, 0x4C, 0x89, 0xB5, 0x78,
+        0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0xBD, 0xD0, 0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0xB5, 0xD8, 0xFE, 0xFF,
+        0xFF, 0x4C, 0x8B, 0xA5, 0xE0, 0xFE, 0xFF, 0xFF, 0x44, 0x8B, 0x8D, 0xA0, 0xFE, 0xFF, 0xFF, 0x48,
+        0x8B, 0x9D, 0x68, 0xFE, 0xFF, 0xFF, 0xE9, 0x2D, 0x01, 0x00, 0x00, 0x8B, 0x8C, 0x31, 0xAC, 0x06,
+        0x00, 0x00, 0x41, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x44, 0x8B, 0x95, 0xA0, 0xFE, 0xFF, 0xFF, 0x45,
+        0x85, 0xD2, 0x48, 0x89, 0xBD, 0xA8, 0xFE, 0xFF, 0xFF, 0x74, 0x39
+    };
+    static const UInt8 kOpenCLDispatchReplace_Sequoia[] = {
+        0x4C, 0x89, 0xBD, 0x58, 0xFE, 0xFF, 0xFF, 0x48, 0x85, 0xDB, 0x74, 0x35, 0x4C, 0x8B, 0x3B, 0x49,
+        0x83, 0xFF, 0x40, 0x76, 0x0A, 0x83, 0xBC, 0x31, 0x9C, 0x05, 0x00, 0x00, 0x00, 0x75, 0x22, 0x4C,
+        0x89, 0xB5, 0x78, 0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0x73, 0x08, 0x4C, 0x8B, 0x63, 0x10, 0x44, 0x8B,
+        0x8D, 0xA0, 0xFE, 0xFF, 0xFF, 0x48, 0x8B, 0x9D, 0x68, 0xFE, 0xFF, 0xFF, 0xE9, 0x27, 0x01, 0x00,
+        0x00, 0xB9, 0x40, 0x00, 0x00, 0x00, 0x41, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x44, 0x8B, 0x95, 0xA0,
+        0xFE, 0xFF, 0xFF, 0x48, 0x89, 0xBD, 0xA8, 0xFE, 0xFF, 0xFF, 0x90
+    };
+    static_assert(sizeof(kOpenCLDispatchFind_Sequoia) == sizeof(kOpenCLDispatchReplace_Sequoia), "Sequoia OpenCL patch size mismatch");
+
+    static const UInt8 kOpenCLDispatchFind_Sonoma[] = {
+        0x48, 0x85, 0xDB, 0x4C, 0x89, 0x95, 0x70, 0xFE, 0xFF, 0xFF, 0x48, 0x89, 0x95, 0x78, 0xFE, 0xFF,
+        0xFF, 0x74, 0x28, 0x4C, 0x8B, 0xBD, 0xD0, 0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0x85, 0xD8, 0xFE, 0xFF,
+        0xFF, 0x48, 0x8B, 0x85, 0x20, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x85, 0xA0, 0xFE, 0xFF, 0xFF, 0x4C,
+        0x8B, 0xB5, 0xE0, 0xFE, 0xFF, 0xFF, 0xE9, 0xFF, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x85, 0x20, 0xFF,
+        0xFF, 0xFF, 0x48, 0x89, 0x85, 0xA0, 0xFE, 0xFF, 0xFF, 0x8B, 0x8C, 0x11, 0xAC, 0x06, 0x00, 0x00,
+        0xBF, 0x01, 0x00, 0x00, 0x00, 0x44, 0x8B, 0x8D, 0xAC, 0xFE, 0xFF, 0xFF, 0x45, 0x85, 0xC9, 0x74,
+        0x70
+    };
+    static const UInt8 kOpenCLDispatchReplace_Sonoma[] = {
+        0x4C, 0x89, 0x95, 0x70, 0xFE, 0xFF, 0xFF, 0x48, 0x89, 0x95, 0x78, 0xFE, 0xFF, 0xFF, 0x48, 0x8B,
+        0x85, 0x20, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x85, 0xA0, 0xFE, 0xFF, 0xFF, 0x48, 0x85, 0xDB, 0x74,
+        0x20, 0x4C, 0x8B, 0x3B, 0x49, 0x83, 0xFF, 0x40, 0x76, 0x0A, 0x83, 0xBC, 0x11, 0x9C, 0x05, 0x00,
+        0x00, 0x00, 0x75, 0x0D, 0x4C, 0x8B, 0x43, 0x08, 0x4C, 0x8B, 0x73, 0x10, 0xE9, 0xF9, 0x00, 0x00,
+        0x00, 0xB9, 0x40, 0x00, 0x00, 0x00, 0xBF, 0x01, 0x00, 0x00, 0x00, 0x44, 0x8B, 0x8D, 0xAC, 0xFE,
+        0xFF, 0xFF, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+        0x90
+    };
+    static_assert(sizeof(kOpenCLDispatchFind_Sonoma) == sizeof(kOpenCLDispatchReplace_Sonoma), "Sonoma OpenCL patch size mismatch");
+
+    static const UInt8 kOpenCLDispatchFind_Tahoe[] = {
+        0x48, 0x85, 0xDB, 0x48, 0x89, 0x95, 0xA0, 0xFE, 0xFF, 0xFF, 0x74, 0x21, 0x4C, 0x89, 0xB5, 0x78,
+        0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0xA5, 0xD0, 0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0xB5, 0xD8, 0xFE, 0xFF,
+        0xFF, 0x4C, 0x8B, 0xBD, 0xE0, 0xFE, 0xFF, 0xFF, 0xE9, 0x04, 0x01, 0x00, 0x00, 0x42, 0x8B, 0x8C,
+        0x19, 0xAC, 0x06, 0x00, 0x00, 0x41, 0xBF, 0x01, 0x00, 0x00, 0x00, 0x41, 0xB8, 0x01, 0x00, 0x00,
+        0x00, 0x83, 0xBD, 0x80, 0xFE, 0xFF, 0xFF, 0x00, 0x0F, 0x84, 0x86, 0x00, 0x00, 0x00
+    };
+    static const UInt8 kOpenCLDispatchReplace_Tahoe[] = {
+        0x48, 0x89, 0x95, 0xA0, 0xFE, 0xFF, 0xFF, 0x48, 0x85, 0xDB, 0x74, 0x28, 0x4C, 0x8B, 0x23, 0x49,
+        0x83, 0xFC, 0x40, 0x76, 0x0B, 0x42, 0x83, 0xBC, 0x19, 0x9C, 0x05, 0x00, 0x00, 0x00, 0x75, 0x14,
+        0x4C, 0x89, 0xB5, 0x78, 0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0x73, 0x08, 0x4C, 0x8B, 0x7B, 0x10, 0xE9,
+        0xFD, 0x00, 0x00, 0x00, 0xB9, 0x40, 0x00, 0x00, 0x00, 0x41, 0xBF, 0x01, 0x00, 0x00, 0x00, 0x41,
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
+    };
+    static_assert(sizeof(kOpenCLDispatchFind_Tahoe) == sizeof(kOpenCLDispatchReplace_Tahoe), "Tahoe OpenCL patch size mismatch");
+
+    static const UInt8 kOpenCLDispatchFind_Ventura[] = {
+        0x4D, 0x85, 0xF6, 0x48, 0x89, 0xBD, 0x88, 0xFE, 0xFF, 0xFF, 0x74, 0x2F, 0x4C, 0x8B, 0xBD, 0xD0,
+        0xFE, 0xFF, 0xFF, 0x4C, 0x8B, 0xB5, 0xD8, 0xFE, 0xFF, 0xFF, 0x48, 0x8B, 0xB5, 0x18, 0xFF, 0xFF,
+        0xFF, 0x4C, 0x8B, 0x95, 0x20, 0xFF, 0xFF, 0xFF, 0x48, 0x8B, 0x9D, 0xE0, 0xFE, 0xFF, 0xFF, 0x44,
+        0x8B, 0x9D, 0xAC, 0xFE, 0xFF, 0xFF, 0xE9, 0xFB, 0x00, 0x00, 0x00, 0x4C, 0x8B, 0x95, 0x18, 0xFF,
+        0xFF, 0xFF, 0x48, 0x8B, 0x85, 0x20, 0xFF, 0xFF, 0xFF, 0x48, 0x89, 0x85, 0x98, 0xFE, 0xFF, 0xFF,
+        0x8B, 0x9C, 0x39, 0xAC, 0x06, 0x00, 0x00, 0xBF, 0x01, 0x00, 0x00, 0x00, 0x44, 0x8B, 0x9D, 0xAC,
+        0xFE, 0xFF, 0xFF, 0x45, 0x85, 0xDB, 0x74, 0x66
+    };
+    static const UInt8 kOpenCLDispatchReplace_Ventura[] = {
+        0x48, 0x89, 0xBD, 0x88, 0xFE, 0xFF, 0xFF, 0x4D, 0x85, 0xF6, 0x74, 0x35, 0x4D, 0x8B, 0x3E, 0x49,
+        0x83, 0xFF, 0x40, 0x76, 0x0A, 0x83, 0xBC, 0x39, 0x9C, 0x05, 0x00, 0x00, 0x00, 0x75, 0x22, 0x49,
+        0x8B, 0x5E, 0x10, 0x4D, 0x8B, 0x76, 0x08, 0x48, 0x8B, 0xB5, 0x18, 0xFF, 0xFF, 0xFF, 0x4C, 0x8B,
+        0x95, 0x20, 0xFF, 0xFF, 0xFF, 0x44, 0x8B, 0x9D, 0xAC, 0xFE, 0xFF, 0xFF, 0xE9, 0xF5, 0x00, 0x00,
+        0x00, 0x4C, 0x8B, 0x95, 0x18, 0xFF, 0xFF, 0xFF, 0x48, 0x8B, 0x85, 0x20, 0xFF, 0xFF, 0xFF, 0x48,
+        0x89, 0x85, 0x98, 0xFE, 0xFF, 0xFF, 0xBB, 0x40, 0x00, 0x00, 0x00, 0xBF, 0x01, 0x00, 0x00, 0x00,
+        0x44, 0x8B, 0x9D, 0xAC, 0xFE, 0xFF, 0xFF, 0x90
+    };
+    static_assert(sizeof(kOpenCLDispatchFind_Ventura) == sizeof(kOpenCLDispatchReplace_Ventura), "Ventura OpenCL patch size mismatch");
+
     static const UInt8 kResolverMask32[] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    };
+    static const UInt8 kResolverMaskFF[128] = {
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
     };
@@ -147,6 +239,8 @@ namespace
          sizeof(kGLDriverHwInfoReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverHwInfoFind, sizeof(kGLDriverHwInfoFind)},
         {kResolverDualCtx_Sonoma, kResolverMask32, sizeof(kResolverDualCtx_Sonoma), 16, kGLDriverDualQuadReplace,
          sizeof(kGLDriverDualQuadReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverDualQuadFind, sizeof(kGLDriverDualQuadFind)},
+        {kOpenCLDispatchFind_Sonoma, kResolverMaskFF, sizeof(kOpenCLDispatchFind_Sonoma), 0, kOpenCLDispatchReplace_Sonoma,
+         sizeof(kOpenCLDispatchReplace_Sonoma), 0, 1, ~static_cast<UInt64>(0), kOpenCLDispatchFind_Sonoma, sizeof(kOpenCLDispatchFind_Sonoma)},
         {kResolverGateCtx_Sonoma, kResolverMask32_GateSonoma, sizeof(kResolverGateCtx_Sonoma), 16, kMTLGateReplace,
          sizeof(kMTLGateReplace), 0, 1, ~static_cast<UInt64>(0), kMTLGateFind, sizeof(kMTLGateFind)},
         {kResolverAllowCtx_Sonoma, kResolverMask32_AllowSonoma, sizeof(kResolverAllowCtx_Sonoma), 16, kMTLAllowReplace_Sonoma,
@@ -186,6 +280,8 @@ namespace
          sizeof(kGLDriverHwInfoReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverHwInfoFind, sizeof(kGLDriverHwInfoFind)},
         {kResolverDualCtx, kResolverMask32, sizeof(kResolverDualCtx), 16, kGLDriverDualQuadReplace,
          sizeof(kGLDriverDualQuadReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverDualQuadFind, sizeof(kGLDriverDualQuadFind)},
+        {kOpenCLDispatchFind_Sequoia, kResolverMaskFF, sizeof(kOpenCLDispatchFind_Sequoia), 0, kOpenCLDispatchReplace_Sequoia,
+         sizeof(kOpenCLDispatchReplace_Sequoia), 0, 1, ~static_cast<UInt64>(0), kOpenCLDispatchFind_Sequoia, sizeof(kOpenCLDispatchFind_Sequoia)},
         {kResolverGateCtx, kResolverMask32_GateSequoia, sizeof(kResolverGateCtx), 16, kMTLGateReplace,
          sizeof(kMTLGateReplace), 0, 1, ~static_cast<UInt64>(0), kMTLGateFind, sizeof(kMTLGateFind)},
         {kResolverSetzCtx, kResolverMask32_SetzSequoia, sizeof(kResolverSetzCtx), 16, kMTLAllowReplace_Sequoia,
@@ -231,6 +327,8 @@ namespace
          sizeof(kGLDriverHwInfoReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverHwInfoFind, sizeof(kGLDriverHwInfoFind)},
         {kResolverDualCtx_Tahoe, kResolverMask32, sizeof(kResolverDualCtx_Tahoe), 16, kGLDriverDualQuadReplace,
          sizeof(kGLDriverDualQuadReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverDualQuadFind, sizeof(kGLDriverDualQuadFind)},
+        {kOpenCLDispatchFind_Tahoe, kResolverMaskFF, sizeof(kOpenCLDispatchFind_Tahoe), 0, kOpenCLDispatchReplace_Tahoe,
+         sizeof(kOpenCLDispatchReplace_Tahoe), 0, 1, ~static_cast<UInt64>(0), kOpenCLDispatchFind_Tahoe, sizeof(kOpenCLDispatchFind_Tahoe)},
         {kResolverGateCtx_Tahoe, kResolverMask32_GateTahoe, sizeof(kResolverGateCtx_Tahoe), 16, kMTLGateReplace_Tahoe,
          sizeof(kMTLGateReplace_Tahoe), 0, 1, ~static_cast<UInt64>(0), kMTLGateFind_Tahoe, sizeof(kMTLGateFind_Tahoe)},
         {kResolverAllowCtx_Tahoe, kResolverMask32_AllowTahoe, sizeof(kResolverAllowCtx_Tahoe), 16, kMTLAllowReplace_Tahoe,
@@ -261,6 +359,8 @@ namespace
          sizeof(kGLDriverHwInfoReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverHwInfoFind, sizeof(kGLDriverHwInfoFind)},
         {kResolverDualCtx_Ventura, kResolverMask32, sizeof(kResolverDualCtx_Ventura), 16, kGLDriverDualQuadReplace,
          sizeof(kGLDriverDualQuadReplace), 0, 1, ~static_cast<UInt64>(0), kGLDriverDualQuadFind, sizeof(kGLDriverDualQuadFind)},
+        {kOpenCLDispatchFind_Ventura, kResolverMaskFF, sizeof(kOpenCLDispatchFind_Ventura), 0, kOpenCLDispatchReplace_Ventura,
+         sizeof(kOpenCLDispatchReplace_Ventura), 0, 1, ~static_cast<UInt64>(0), kOpenCLDispatchFind_Ventura, sizeof(kOpenCLDispatchFind_Ventura)},
         {kResolverGateCtx_Ventura, kResolverMask32_GateSonoma, sizeof(kResolverGateCtx_Ventura), 16, kMTLGateReplace,
          sizeof(kMTLGateReplace), 0, 1, ~static_cast<UInt64>(0), kMTLGateFind, sizeof(kMTLGateFind)},
         {kResolverAllowCtx_Ventura, kResolverMask32_AllowSonoma, sizeof(kResolverAllowCtx_Ventura), 16, kMTLAllowReplace_Sonoma,
@@ -281,6 +381,9 @@ bool UserPatches::mediaSupported() const
 
 void UserPatches::init()
 {
+    if (this->cacheLock == nullptr) {
+        this->cacheLock = IOSimpleLockAlloc();
+    }
     this->traceEnabled = checkKernelArgument(kBootArgUserPatchTrace);
     this->enabled = kGLFixDefaultEnabled;
     if (checkKernelArgument(kBootArgNoGLFix) || checkKernelArgument(kBootArgGLFixOff)) {
@@ -357,6 +460,9 @@ void UserPatches::selectPatchSet()
 
 void UserPatches::processPatcher(KernelPatcher& patcher)
 {
+    if (this->cacheLock == nullptr) {
+        this->cacheLock = IOSimpleLockAlloc();
+    }
     if (!this->enabled && !this->vdaEnabled) {
         DBGLOG("UserPatch", "User-space driver patches are disabled");
         return;
@@ -490,6 +596,70 @@ static bool matchSignature(const UInt8* const bytes, const UserPatches::Signatur
         }
     }
     return false;
+}
+
+void UserPatches::recordCachedSite(const VnodeKind vnodeKind, const UInt64 pageOffset, const size_t inPageOffset,
+                                   const UInt8* const find, const UInt8* const replace, const size_t size)
+{
+    if (vnodeKind == kVnodeNone || find == nullptr || replace == nullptr || size == 0 || size > 0xFF ||
+        inPageOffset + size > kPageSize) {
+        return;
+    }
+
+    if (this->cacheLock != nullptr) { IOSimpleLockLock(this->cacheLock); }
+
+    const size_t count = static_cast<size_t>(this->cachedSiteCount);
+    for (size_t i = 0; i < count; ++i) {
+        const auto& existing = this->cachedSites[i];
+        if (existing.vnodeKind == vnodeKind && existing.pageOffset == pageOffset &&
+            existing.inPageOffset == static_cast<UInt16>(inPageOffset)) {
+            if (this->cacheLock != nullptr) { IOSimpleLockUnlock(this->cacheLock); }
+            return;
+        }
+    }
+
+    if (count < kMaxCachedSites) {
+        this->cachedSites[count] = {
+            pageOffset,
+            find,
+            replace,
+            static_cast<UInt16>(inPageOffset),
+            static_cast<UInt8>(size),
+            vnodeKind,
+        };
+        __atomic_store_n(&this->cachedSiteCount, static_cast<SInt32>(count + 1), __ATOMIC_RELEASE);
+    } else {
+        SYSLOG("UserPatch", "Resolver: cached patch site table full (%zu)", kMaxCachedSites);
+    }
+
+    if (this->cacheLock != nullptr) { IOSimpleLockUnlock(this->cacheLock); }
+}
+
+void UserPatches::reapplyCachedSites(const VnodeKind vnodeKind, const UInt64 pageOffset, const UInt8* const bytes)
+{
+    const size_t count = static_cast<size_t>(__atomic_load_n(&this->cachedSiteCount, __ATOMIC_ACQUIRE));
+    for (size_t i = 0; i < count; ++i) {
+        const auto& site = this->cachedSites[i];
+        if (site.vnodeKind != vnodeKind || site.pageOffset != pageOffset) {
+            continue;
+        }
+        if (static_cast<size_t>(site.inPageOffset) + site.size > kPageSize) {
+            continue;
+        }
+        if (memcmp(bytes + site.inPageOffset, site.find, site.size) != 0) {
+            continue;
+        }
+
+        if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) {
+            SYSLOG("UserPatch", "Resolver: failed to disable kernel write protection (re-apply)");
+            return;
+        }
+        memcpy(const_cast<UInt8*>(bytes) + site.inPageOffset, site.replace, site.size);
+        MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+
+        SYSLOG("UserPatch", "Resolver re-applied cached patch (kind=%u, page=0x%llX, off=0x%X)",
+               static_cast<unsigned>(vnodeKind), pageOffset, static_cast<unsigned>(site.inPageOffset));
+    }
 }
 
 void UserPatches::patchMediaPage(const UInt8* const bytes, const MediaPatchPlan::Page& page,
@@ -630,6 +800,10 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
         return;
     }
 
+    // VA/GVA and VP9 pages have their own full-page validation and reapply
+    // on every clean fault. The cache is for the GL/Metal signature sites.
+    this->reapplyCachedSites(isGLDriver ? kVnodeGLDriver : kVnodeSharedCache, pageOffset, bytes);
+
     if (!this->resolverEnabled || this->signatures == nullptr || this->signatureCount == 0) {
         return;
     }
@@ -650,7 +824,7 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
             const auto applied = static_cast<UInt32>(OSIncrementAtomic(&budgetCounter) + 1);
             NRed::singleton().setProp32("NRedGLResourceBudgetApplied", applied);
         }
-        for (size_t signatureIndex = 0; signatureIndex < 2 && signatureIndex < this->signatureCount; signatureIndex++) {
+        for (size_t signatureIndex = 0; signatureIndex < 3 && signatureIndex < this->signatureCount; signatureIndex++) {
             const auto& signature = this->signatures[signatureIndex];
             if (signature.count == 0 ||
                 (signature.pageOffset != ~static_cast<UInt64>(0) && signature.pageOffset != pageOffset)) {
@@ -669,6 +843,8 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
 
                 MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
 
+                this->recordCachedSite(kVnodeGLDriver, pageOffset, matchOffset + signature.patchOffset,
+                                       signature.find, signature.replace, signature.replaceSize);
                 this->tracePatch("GL", signatureIndex, pageOffset, matchOffset + signature.patchOffset);
                 static volatile UInt32 glResolverCounter{0};
                 const auto glCount = static_cast<UInt32>(OSIncrementAtomic(&glResolverCounter) + 1);
@@ -693,6 +869,8 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
                     for (size_t off = 0; off + sizeof(kGLDriverHwInfoFind) <= kPageSize; ++off) {
                         if (memcmp(bytes + off, kGLDriverHwInfoFind, sizeof(kGLDriverHwInfoFind)) == 0) {
                             memcpy(const_cast<UInt8*>(bytes) + off, kGLDriverHwInfoReplace, sizeof(kGLDriverHwInfoReplace));
+                            this->recordCachedSite(kVnodeSharedCache, pageOffset, off, kGLDriverHwInfoFind,
+                                                   kGLDriverHwInfoReplace, sizeof(kGLDriverHwInfoReplace));
                             replacedCount++;
                         }
                     }
@@ -707,10 +885,10 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
 
         // Gate 3: For Metal signatures in dyld shared cache, require co-occurrence of Gate and Allow
         // on the exact same 4KB page, within a sane relative distance (< 0x500 bytes).
-        // Signatures index 2 & 3 in all tables (Sonoma, Sequoia, Tahoe) represent the Gate and Allow pair.
-        if (this->signatureCount >= 4) {
-            const auto& gateSig = this->signatures[2];
-            const auto& allowSig = this->signatures[3];
+        // The third GL signature occupies index 2; Metal Gate/Allow are 3/4.
+        if (this->signatureCount >= 5) {
+            const auto& gateSig = this->signatures[3];
+            const auto& allowSig = this->signatures[4];
 
             if (gateSig.pageOffset == ~static_cast<UInt64>(0) && allowSig.pageOffset == ~static_cast<UInt64>(0)) {
                 if (gateSig.count > 0 && allowSig.count > 0) {
@@ -733,8 +911,12 @@ void UserPatches::patchSignaturePage(const void* const data, const UInt64 pageOf
 
                             MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
 
-                            this->tracePatch("Metal Gate", 2, pageOffset, gateMatch + gateSig.patchOffset);
-                            this->tracePatch("Metal Allow", 3, pageOffset, allowMatch + allowSig.patchOffset);
+                            this->recordCachedSite(kVnodeSharedCache, pageOffset, gateMatch + gateSig.patchOffset,
+                                                   gateSig.find, gateSig.replace, gateSig.replaceSize);
+                            this->recordCachedSite(kVnodeSharedCache, pageOffset, allowMatch + allowSig.patchOffset,
+                                                   allowSig.find, allowSig.replace, allowSig.replaceSize);
+                            this->tracePatch("Metal Gate", 3, pageOffset, gateMatch + gateSig.patchOffset);
+                            this->tracePatch("Metal Allow", 4, pageOffset, allowMatch + allowSig.patchOffset);
 
                             static volatile UInt32 blendResolverCounter{0};
                             const auto count = static_cast<UInt32>(OSIncrementAtomic(&blendResolverCounter) + 1);

@@ -25,6 +25,7 @@
 #include <PenguinWizardry/KernelVersion.hpp>
 #include <Headers/kern_user.hpp>
 #include <MediaPatchPlan.hpp>
+#include <IOKit/IOLocks.h>
 #include <libkern/OSTypes.h>
 
 // Patches Apple's user-space OpenGL drivers, which is where the Chromium/GL corruption originates.
@@ -156,6 +157,23 @@ public:
     bool mediaSupported() const;
 
 private:
+    static constexpr size_t kMaxCachedSites = 64;
+
+    enum VnodeKind : UInt8 {
+        kVnodeNone        = 0,
+        kVnodeGLDriver    = 1,
+        kVnodeSharedCache = 2,
+    };
+    struct CachedPatchSite
+    {
+        UInt64       pageOffset;
+        const UInt8* find;
+        const UInt8* replace;
+        UInt16       inPageOffset;
+        UInt8        size;
+        VnodeKind    vnodeKind;
+    };
+
     const SignaturePatch* signatures{nullptr};
     size_t                signatureCount{0};
     bool                  resolverEnabled{false};
@@ -169,6 +187,9 @@ private:
     bool                  kernelIdentityMatches{false};
     bool                  vp9RegistryEnabled{false};
     volatile UInt32       vp9RegistryApplied{0};
+    CachedPatchSite       cachedSites[kMaxCachedSites]{};
+    SInt32                cachedSiteCount{0};
+    IOSimpleLock*         cacheLock{nullptr};
 
     void selectPatchSet();
     auto currentApuMask() const -> ApuMask;
@@ -180,6 +201,9 @@ private:
     mach_vm_address_t orgCsValidateRange{0};
 
     auto installNativePagePatcher(KernelPatcher& patcher) -> bool;
+    void recordCachedSite(VnodeKind vnodeKind, UInt64 pageOffset, size_t inPageOffset, const UInt8* find,
+                          const UInt8* replace, size_t size);
+    void reapplyCachedSites(VnodeKind vnodeKind, UInt64 pageOffset, const UInt8* bytes);
     void tracePatch(const char* kind, size_t signatureIndex, UInt64 pageOffset, size_t matchOffset);
     void patchSignaturePage(const void* data, UInt64 pageOffset, void* vnode);
     void patchMediaPage(const UInt8* bytes, const MediaPatchPlan::Page& page, size_t pageIndex);
