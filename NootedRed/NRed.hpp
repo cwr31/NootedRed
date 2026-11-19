@@ -69,6 +69,7 @@ public:
     static NRed& singleton();
 
     auto& getAttributes() const { return this->attributes; }    // TODO: Remove!
+    auto  getIGPU() const { return this->iGPU; }
     auto  getDeviceID() const { return deviceID; }              // TODO: Remove!
     auto  getPciRevision() const { return pciRevision; }        // TODO: Remove!
     auto  getDevRevision() const { return devRevision; }        // TODO: Remove!
@@ -81,5 +82,7 @@ public:
     void processPatcher(KernelPatcher& patcher);    // TODO: Remove!
 
     void   setProp32(const char* key, UInt32 value) const;    // TODO: Remove!
+    bool   isMmioReady() const { return this->rmmio != nullptr && this->rmmioPtr != nullptr; }
     UInt32 readReg32(UInt32 reg) const;                       // TODO: Remove!
+    void   writeReg32(UInt32 reg, UInt32 value) const;
 };

@@ -55,6 +55,10 @@ along with this work.  If not, see https://git.chefkiss.dev/ChefKiss/OpenKnowled
 - [GL probe and reproduction notes](tools/README.md) — CGL/OpenGL dual-source probe and the evidence ladder.
 - [HW-info probe](tools/README-hwinfo-probe.md) — IOKit probe for the UBM hardware-info blob.
 - [Chromium/OpenGL issue report](Chromium-OpenGL-Issue-Report.md) — original issue write-up behind the fix.
+- [Renoir system RAM placement](docs/RAM-Placement.md) — background, six experimental boot options,
+  allocation and page-in hooks, and driver compatibility checks.
+- [Renoir test and rollback guide](docs/RAM-Validation.md) — setup, hardware results, and how to
+  measure placement and capacity.
 
 ## Build artifacts
 
