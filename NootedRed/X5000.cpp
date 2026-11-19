@@ -24,14 +24,18 @@
 #include <AMDGFX9DCN2Display.hpp>
 #include <AMDGFX9DCNDisplay.hpp>
 #include <Backlight.hpp>
+#include <CompatTarget.hpp>
+#include <GPUDriversAMD/Accel/HWAlignManager.hpp>
 #include <GPUDriversAMD/Accel/HWDisplay.hpp>
 #include <GPUDriversAMD/Accel/HWEngine.hpp>
 #include <GPUDriversAMD/AddrLib.hpp>
 #include <GPUDriversAMD/FB/Attributes.hpp>
 #include <GPUDriversAMD/Family.hpp>
+#include <Headers/kern_api.hpp>
 #include <Headers/kern_mach.hpp>
 #include <Headers/kern_patcher.hpp>
 #include <Headers/kern_util.hpp>
+#include <IOKit/pci/IOPCIDevice.h>
 #include <Kexts.hpp>
 #include <NRed.hpp>
 #include <PenguinWizardry/KernelVersion.hpp>
@@ -40,6 +44,7 @@
 #include <DeviceProfile.hpp>
 #include <VCNBridge.hpp>
 #include <VDA.hpp>
+#include <libkern/OSAtomic.h>
 #include <libkern/OSTypes.h>
 #include <libkern/c++/OSObject.h>
 #include <mach/i386/vm_param.h>
@@ -82,6 +87,170 @@ static const UInt8 kCreateAccelChannelsPatched10_14[]  = {0x8D, 0x04, 0x09, 0x8D
 
 namespace
 {
+    constexpr char kAllocDataBufferMemory[] =
+        "__ZN16IOAccelResource221allocDataBufferMemoryEP14IOAccelShared2bj";
+    constexpr char kCreateSysMemory[] =
+        "__ZN16IOAccelSysMemory11withOptionsEP22IOGraphicsAccelerator2P4taskP14IOAccelShared2P16IOAccelResource2jyb";
+    constexpr size_t kResourceTypeOffset = 0x14;
+    constexpr size_t kAcceleratorOffset  = 0x18;
+    constexpr size_t kMainMemoryOffset   = 0x88;
+    constexpr UInt8  kDataBufferType     = 0xA;
+
+    constexpr size_t kExistingMemoryCheckOffset = 0x89;
+    constexpr size_t kSystemAllocationOffset    = 0xA8;
+    constexpr UInt8 kBufferAllocationEntry[] = {
+        0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50,
+        0x41, 0x89, 0xCE, 0x49, 0x89, 0xF4, 0x48, 0x89, 0xFB, 0x85, 0xD2, 0x74, 0x6E, 0x48,
+        0x8B, 0x43, kAcceleratorOffset, 0xF6, 0x80, 0x78, 0x0C, 0x00, 0x00, 0x02, 0x74, 0x61,
+    };
+    constexpr UInt8 kExistingMemoryCheck[] = {
+        0x41, 0xB7, 0x01, 0x48, 0x83, 0xBB, kMainMemoryOffset, 0x00, 0x00, 0x00, 0x00, 0x74, 0x12,
+    };
+    constexpr UInt8 kSystemAllocation[] = {
+        0x48, 0x8B, 0x7B, kAcceleratorOffset, 0x4C, 0x8B, 0x8B, 0xC8, 0x00, 0x00, 0x00, 0xC7, 0x04, 0x24,
+        0x00, 0x00, 0x00, 0x00, 0x31, 0xF6, 0x4C, 0x89, 0xE2, 0x31, 0xC9, 0x45, 0x89, 0xF0, 0xE8,
+    };
+    constexpr size_t kSystemCallEnd = kSystemAllocationOffset + sizeof(kSystemAllocation) + sizeof(SInt32);
+
+    constexpr UInt8 kAcceleratorUUID[] = {
+        0x6C, 0x4A, 0x16, 0xB1, 0x66, 0xDC, 0x3A, 0x8B, 0x9F, 0x0B, 0xD3, 0xE0, 0x27, 0xB1, 0x6E, 0xB1,
+    };
+    constexpr UInt8 kX5000UUID[] = {
+        0xE2, 0x7E, 0xFB, 0x64, 0xDE, 0x35, 0x3C, 0xE5, 0xB3, 0xAB, 0xA3, 0x22, 0x18, 0xB4, 0x95, 0xD3,
+    };
+    constexpr size_t kAllocBranchOffset  = 0x27;
+    constexpr size_t kRAMBranchOffset    = 0xDA;
+    constexpr size_t kPageBranchOffset   = 0x143;
+    constexpr size_t kPageContinueOffset = 0x152;
+    constexpr size_t kPageReuseOffset    = 0x360;
+    constexpr UInt8 kAllocBranch[] = {
+        0x8B, 0x87, 0x90, 0x0C, 0x00, 0x00, 0x0F, 0xBA, 0xE0, 0x15, 0x0F, 0x82, 0xA3, 0x00, 0x00, 0x00,
+    };
+    constexpr UInt8 kRAMBranch[] = {
+        0x49, 0x8B, 0x8E, 0xC8, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x15,
+    };
+    constexpr UInt8 kPageBranch[] = {
+        0x41, 0x8B, 0x86, 0xB4, 0x01, 0x00, 0x00, 0x89, 0xC3, 0xC1, 0xEB, 0x1A, 0x83, 0xE3, 0x0F,
+    };
+    constexpr UInt8 kPageReuse[] = {
+        0x49, 0x8B, 0x06, 0x4C, 0x89, 0xF7, 0xBE, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0xEA, 0x4C, 0x89,
+        0xE1, 0xFF, 0x90, 0x38, 0x03, 0x00, 0x00,
+    };
+    constexpr size_t kBackingMemoryOffset  = 0x80;
+    constexpr size_t kSharedSurfaceOffset  = 0xE0;
+    constexpr size_t kSurfaceParamsOffset  = 0x180;
+    constexpr size_t kSurfaceAuxOffsets[]  = {0x188, 0x190, 0x198, 0x1A8};
+    constexpr size_t kTextureFlagsOffset   = 0x1B4;
+    constexpr size_t kMappingMemoryOffset  = 0x18;
+    constexpr UInt8  kStandardResourceType = 0x40;
+    constexpr UInt8  kSysMemSharedType     = 0x80;
+    constexpr UInt8  kIOSurfaceType        = 0x82;
+    constexpr UInt8  kVidMemSharedType     = 0xC0;
+    constexpr UInt32 kDepthStencilCopyKind = 2;
+    constexpr UInt32 kStagingCopyKind      = 8;
+    constexpr UInt32 kSkipStagingFlag      = 1U << 8U;
+
+    bool ramColorRequested{false};
+    bool ramDepthStencilRequested{false};
+    bool ramIOSurfaceRequested{false};
+    bool ramHighColorRequested{false};
+    bool ramVideoPlanesRequested{false};
+    bool ramX5000Verified{false};
+
+    bool isRenoirResource(void* const resource)
+    {
+        const auto& nred = NRed::singleton();
+        if (resource == nullptr || nred.getIGPU() == nullptr || !nred.getAttributes().isRenoir()) { return false; }
+        const auto* const accelerator = getMember<IOService*>(resource, kAcceleratorOffset);
+        return accelerator != nullptr && accelerator->getProvider() == nred.getIGPU()
+               && accelerator->metaCast("AMDRadeonX5000_AMDVega10GraphicsAccelerator") != nullptr;
+    }
+
+    bool isRAMMemory(const OSObject* const memory)
+    {
+        return memory != nullptr && memory->metaCast("IOAccelSysMemory") != nullptr;
+    }
+
+    ATIFormat textureFormat(const UInt32 flags) { return static_cast<ATIFormat>(flags & 0xFF); }
+
+    UInt32 textureCopyKind(const UInt32 flags) { return (flags >> 26) & 0xF; }
+
+    enum class RAMTextureKind : UInt8 { Unsupported, Color8, HighColor, VideoPlane };
+
+    RAMTextureKind ramTextureKind(const ATIFormat format)
+    {
+        switch (format) {
+            case ATIFormat::BGRA8:
+            case ATIFormat::RGBA8: return RAMTextureKind::Color8;
+            case ATIFormat::BGRA16F:
+            case ATIFormat::RGBA16F:
+            case ATIFormat::BGRA1010102:
+            case ATIFormat::RGBA1010102: return RAMTextureKind::HighColor;
+            case ATIFormat::R8:
+            case ATIFormat::Rg8:
+            case ATIFormat::R16:
+            case ATIFormat::Rg16: return RAMTextureKind::VideoPlane;
+            default: return RAMTextureKind::Unsupported;
+        }
+    }
+
+    bool useRAMTexture(void* const resource, const UInt32 flags, const RAMTextureKind kind)
+    {
+        if (textureCopyKind(flags) == kDepthStencilCopyKind
+            || getMember<void*>(resource, kSurfaceParamsOffset) != nullptr)
+        {
+            return false;
+        }
+        if (kind == RAMTextureKind::Color8) { return ramColorRequested; }
+        if ((kind != RAMTextureKind::HighColor || !ramHighColorRequested)
+            && (kind != RAMTextureKind::VideoPlane || !ramVideoPlanesRequested))
+        {
+            return false;
+        }
+        for (const auto offset : kSurfaceAuxOffsets) {
+            if (getMember<void*>(resource, offset) != nullptr) { return false; }
+        }
+        return true;
+    }
+
+    bool isIOSurfaceResource(void* const resource, const UInt8 type, const bool includeSysMemShared)
+    {
+        if (type == kIOSurfaceType) { return true; }
+        return (type == kVidMemSharedType || (includeSysMemShared && type == kSysMemSharedType))
+               && getMember<void*>(resource, kSharedSurfaceOffset) != nullptr;
+    }
+
+    bool wantsRAMTextureAllocation()
+    {
+        return ramColorRequested || ramDepthStencilRequested || ramHighColorRequested || ramVideoPlanesRequested;
+    }
+
+    bool wantsRAMSurfaceRoute()
+    {
+        return ramColorRequested || ramIOSurfaceRequested || ramHighColorRequested || ramVideoPlanesRequested;
+    }
+
+    void logFirstRAMUse(volatile UInt32& logged, const char* const resource)
+    {
+        if (OSCompareAndSwap(0, 1, &logged)) { SYSLOG("RAMResources", "Selected system RAM path for %s", resource); }
+    }
+
+    template<size_t length>
+    bool matchesCode(const mach_vm_address_t function, const mach_vm_address_t slide, const size_t size,
+                     const size_t offset, const UInt8 (&expected)[length])
+    {
+        return function != 0 && function >= slide && offset <= size && length <= size - offset
+               && function - slide <= size - offset - length
+               && memcmp(reinterpret_cast<const void*>(function + offset), expected, length) == 0;
+    }
+
+    bool matchesImage(const mach_vm_address_t slide, const size_t size, const UInt8 (&uuid)[16])
+    {
+        CompatTarget::Identity identity;
+        return CompatTarget::parseMachOIdentity(identity, reinterpret_cast<const UInt8*>(slide), size)
+               && memcmp(identity.uuid, uuid, sizeof(uuid)) == 0;
+    }
+
     // Fixes an unsigned 32-bit underflow in IOAccelMemoryAllocator2::allocPages
     // when non-contiguous allocation (`isContiguousOnly == false`) encounters a
     // small free hole whose aligned start `(holeStart + align - 1) & ~(align - 1)`
@@ -315,11 +484,285 @@ X5000::X5000()
     }
 }
 
+extern "C" {
+[[gnu::used]] static mach_vm_address_t nredRAMAllocContinue{0};
+[[gnu::used]] static mach_vm_address_t nredRAMAllocSystem{0};
+[[gnu::used]] static mach_vm_address_t nredRAMPageContinue{0};
+[[gnu::used]] static mach_vm_address_t nredRAMPageReuse{0};
+
+[[gnu::used, gnu::noinline]] static bool nredRAMSelectAllocation(void* const resource)
+{
+    if (!__atomic_load_n(&ramX5000Verified, __ATOMIC_ACQUIRE) || !isRenoirResource(resource)
+        || getMember<UInt8>(resource, kResourceTypeOffset) != kStandardResourceType
+        || getMember<void*>(resource, kMainMemoryOffset) != nullptr
+        || getMember<void*>(resource, kBackingMemoryOffset) != nullptr)
+    {
+        return false;
+    }
+
+    const auto flags = getMember<UInt32>(resource, kTextureFlagsOffset);
+
+    if (ramDepthStencilRequested && textureCopyKind(flags) == kDepthStencilCopyKind) {
+        switch (textureFormat(flags)) {
+            case ATIFormat::Depth16:
+            case ATIFormat::Depth24Stencil8:
+            case ATIFormat::Depth32:
+            case ATIFormat::Depth32F:
+            case ATIFormat::Depth32fStencil8:
+            case ATIFormat::Stencil8: {
+                static volatile UInt32 logged{0};
+                logFirstRAMUse(logged, "depth/stencil texture");
+                return true;
+            }
+            default: return false;
+        }
+    }
+
+    const auto kind = ramTextureKind(textureFormat(flags));
+    if (!useRAMTexture(resource, flags, kind)) { return false; }
+
+    static volatile UInt32 loggedColor{0};
+    static volatile UInt32 loggedHighColor{0};
+    static volatile UInt32 loggedVideoPlane{0};
+    switch (kind) {
+        case RAMTextureKind::Color8:
+            logFirstRAMUse(loggedColor, "BGRA8/RGBA8 color texture");
+            return true;
+        case RAMTextureKind::HighColor:
+            logFirstRAMUse(loggedHighColor, "high precision color texture");
+            return true;
+        case RAMTextureKind::VideoPlane:
+            logFirstRAMUse(loggedVideoPlane, "R/RG plane texture");
+            return true;
+        default: return false;
+    }
+}
+
+[[gnu::used, gnu::noinline]] static bool nredRAMReuseSurface(void* const resource, void* const mainMapping,
+                                                            void* const backingMapping)
+{
+    if (!isRenoirResource(resource) || mainMapping == nullptr || backingMapping == nullptr) { return false; }
+    const auto type = getMember<UInt8>(resource, kResourceTypeOffset);
+    const auto flags = getMember<UInt32>(resource, kTextureFlagsOffset);
+    if (textureCopyKind(flags) != kStagingCopyKind || (flags & kSkipStagingFlag) != 0) { return false; }
+
+    const auto kind = ramTextureKind(textureFormat(flags));
+    const auto standard = type == kStandardResourceType && useRAMTexture(resource, flags, kind);
+    const auto sharedEnabled = (kind == RAMTextureKind::Color8 && ramIOSurfaceRequested)
+                               || (kind == RAMTextureKind::HighColor && ramHighColorRequested)
+                               || (kind == RAMTextureKind::VideoPlane && ramVideoPlanesRequested);
+    const auto shared = sharedEnabled && isIOSurfaceResource(resource, type, kind != RAMTextureKind::Color8);
+    if (!standard && !shared) { return false; }
+
+    const auto* const main = getMember<OSObject*>(mainMapping, kMappingMemoryOffset);
+    const auto* const backing = getMember<OSObject*>(backingMapping, kMappingMemoryOffset);
+    if (!isRAMMemory(main) || !isRAMMemory(backing)) { return false; }
+
+    static volatile UInt32 loggedColor{0};
+    static volatile UInt32 loggedShared{0};
+    static volatile UInt32 loggedHighColor{0};
+    static volatile UInt32 loggedVideoPlane{0};
+    switch (kind) {
+        case RAMTextureKind::Color8:
+            logFirstRAMUse(standard ? loggedColor : loggedShared,
+                           standard ? "color texture page-in" : "IOSurface page-in");
+            break;
+        case RAMTextureKind::HighColor:
+            logFirstRAMUse(loggedHighColor, "high precision color page-in");
+            break;
+        case RAMTextureKind::VideoPlane:
+            logFirstRAMUse(loggedVideoPlane, "R/RG plane page-in");
+            break;
+        default: return false;
+    }
+    return true;
+}
+
+[[gnu::naked]] static void nredRAMAllocBranch()
+{
+    asm volatile(
+        "pushq %rdi\n"
+        "subq $8, %rsp\n"
+        "movq %r14, %rdi\n"
+        "callq _nredRAMSelectAllocation\n"
+        "testb %al, %al\n"
+        "leaq 8(%rsp), %rsp\n"
+        "popq %rdi\n"
+        "movl 0xc90(%rdi), %eax\n"
+        "jnz 1f\n"
+        "btl $21, %eax\n"
+        "jc 2f\n"
+        "jmpq *_nredRAMAllocContinue(%rip)\n"
+        "1:\n"
+        "btrl $26, %eax\n"
+        "2:\n"
+        "jmpq *_nredRAMAllocSystem(%rip)\n");
+}
+
+[[gnu::naked]] static void nredRAMPageBranch()
+{
+    asm volatile(
+        "movq %r14, %rdi\n"
+        "movq %r13, %rsi\n"
+        "movq %r12, %rdx\n"
+        "callq _nredRAMReuseSurface\n"
+        "movzbl %al, %r11d\n"
+        "movl 0x1b4(%r14), %eax\n"
+        "movl %eax, %ebx\n"
+        "shrl $26, %ebx\n"
+        "andl $15, %ebx\n"
+        "testl %r11d, %r11d\n"
+        "jnz 1f\n"
+        "jmpq *_nredRAMPageContinue(%rip)\n"
+        "1:\n"
+        "jmpq *_nredRAMPageReuse(%rip)\n");
+}
+}
+
+void X5000::init()
+{
+    this->ramBuffersRequested = checkKernelArgument("-NRedRAMBuffers");
+    ramColorRequested         = checkKernelArgument("-NRedRAMTextures");
+    ramDepthStencilRequested  = checkKernelArgument("-NRedRAMDepthStencil");
+    ramIOSurfaceRequested     = checkKernelArgument("-NRedRAMIOSurfaces");
+    ramHighColorRequested     = checkKernelArgument("-NRedRAMHighColor");
+    ramVideoPlanesRequested   = checkKernelArgument("-NRedRAMVideoPlanes");
+    if (this->ramBuffersRequested || wantsRAMTextureAllocation()) {
+        lilu.onKextLoadForce(&kextIOAcceleratorFamily2);
+    }
+}
+
+namespace
+{
+    bool routeRAMBranch(KernelPatcher& patcher, const size_t id, const mach_vm_address_t address, void (*hook)())
+    {
+        KernelPatcher::RouteRequest request{nullptr, hook};
+        request.from = address;
+        const auto installed = patcher.routeMultipleLong(id, &request, 1);
+        patcher.clearError();
+        return installed;
+    }
+
+    void installRAMTextureRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+                               const size_t size)
+    {
+        const auto function = patcher.solveSymbol(id, "__ZN16IOAccelResource211allocMemoryEP14IOAccelShared2", slide, size);
+        patcher.clearError();
+        if (!matchesImage(slide, size, kAcceleratorUUID)
+            || !matchesCode(function, slide, size, kAllocBranchOffset, kAllocBranch)
+            || !matchesCode(function, slide, size, kRAMBranchOffset, kRAMBranch))
+        {
+            SYSLOG("RAMResources", "Unsupported IOAcceleratorFamily2 texture allocation path");
+            return;
+        }
+
+        nredRAMAllocContinue = function + kAllocBranchOffset + sizeof(kAllocBranch);
+        nredRAMAllocSystem   = function + kRAMBranchOffset;
+        const auto installed = routeRAMBranch(patcher, id, function + kAllocBranchOffset, nredRAMAllocBranch);
+        SYSLOG("RAMResources", "Texture allocation route %s", installed ? "installed" : "failed");
+    }
+
+    void installRAMSurfaceRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+                                const size_t size)
+    {
+        const auto function = patcher.solveSymbol(
+            id, "__ZN31AMDRadeonX5000_AMDAccelResource6pageonEP12IOAccelEventby", slide, size);
+        patcher.clearError();
+        if (!matchesCode(function, slide, size, kPageBranchOffset, kPageBranch)
+            || !matchesCode(function, slide, size, kPageReuseOffset, kPageReuse))
+        {
+            SYSLOG("RAMResources", "Unsupported X5000 surface page-in path");
+            return;
+        }
+
+        nredRAMPageContinue = function + kPageContinueOffset;
+        nredRAMPageReuse    = function + kPageReuseOffset;
+        const auto installed = routeRAMBranch(patcher, id, function + kPageBranchOffset, nredRAMPageBranch);
+        SYSLOG("RAMResources", "Surface page-in route %s", installed ? "installed" : "failed");
+    }
+}
+
+void X5000::installRAMBufferRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+                                 const size_t size)
+{
+    const auto entry = patcher.solveSymbol(id, kAllocDataBufferMemory, slide, size);
+    patcher.clearError();
+    const auto systemAllocator = patcher.solveSymbol(id, kCreateSysMemory, slide, size);
+    patcher.clearError();
+
+    if (entry == 0 || systemAllocator == 0 || entry < slide || size < kSystemCallEnd
+        || entry - slide > size - kSystemCallEnd)
+    {
+        SYSLOG("RAMBuffers", "System RAM allocation entry points unavailable");
+        return;
+    }
+
+    const auto* const code = reinterpret_cast<const UInt8*>(entry);
+    SInt32 displacement{0};
+    memcpy(&displacement, code + kSystemCallEnd - sizeof(displacement), sizeof(displacement));
+    const auto callTarget = entry + kSystemCallEnd + static_cast<mach_vm_address_t>(displacement);
+    if (memcmp(code, kBufferAllocationEntry, sizeof(kBufferAllocationEntry)) != 0
+        || memcmp(code + kExistingMemoryCheckOffset, kExistingMemoryCheck, sizeof(kExistingMemoryCheck)) != 0
+        || memcmp(code + kSystemAllocationOffset, kSystemAllocation, sizeof(kSystemAllocation)) != 0
+        || callTarget != systemAllocator)
+    {
+        SYSLOG("RAMBuffers", "Unsupported IOAcceleratorFamily2 buffer allocator");
+        return;
+    }
+
+    KernelPatcher::RouteRequest request{kAllocDataBufferMemory, wrapAllocDataBufferMemory,
+                                        this->orgAllocDataBufferMemory};
+    if (!patcher.routeMultipleLong(id, &request, 1, slide, size)) {
+        patcher.clearError();
+        SYSLOG("RAMBuffers", "Could not route data buffer allocation");
+        return;
+    }
+
+    SYSLOG("RAMBuffers", "Installed native system RAM route for Renoir data buffers");
+}
+
+bool X5000::wrapAllocDataBufferMemory(void* const resource, void* const shared, const bool preferVRAM,
+                                      const UInt32 options)
+{
+    const auto original = FunctionCast(wrapAllocDataBufferMemory, singleton().orgAllocDataBufferMemory);
+    if (!preferVRAM || shared == nullptr || !isRenoirResource(resource)
+        || getMember<UInt8>(resource, kResourceTypeOffset) != kDataBufferType
+        || getMember<void*>(resource, kMainMemoryOffset) != nullptr)
+    {
+        return original(resource, shared, preferVRAM, options);
+    }
+
+    const auto allocated = original(resource, shared, false, options);
+    static volatile UInt32 logged{0};
+    if (allocated && getMember<void*>(resource, kMainMemoryOffset) != nullptr && OSCompareAndSwap(0, 1, &logged)) {
+        SYSLOG("RAMBuffers", "Allocated first Renoir data buffer in system RAM");
+    }
+    return allocated;
+}
+
 void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
+    if ((this->ramBuffersRequested || wantsRAMTextureAllocation())
+        && kextIOAcceleratorFamily2.loadIndex == id)
+    {
+        if (this->ramBuffersRequested) { this->installRAMBufferRoute(patcher, id, slide, size); }
+        if (wantsRAMTextureAllocation()) { installRAMTextureRoute(patcher, id, slide, size); }
+        return;
+    }
     if (kextRadeonX5000.loadIndex != id) { return; }
 
     NRed::singleton().hwLateInit();
+
+    if (wantsRAMTextureAllocation() || wantsRAMSurfaceRoute()) {
+        const auto verified = matchesImage(slide, size, kX5000UUID);
+        __atomic_store_n(&ramX5000Verified, verified, __ATOMIC_RELEASE);
+        if (!verified) {
+            SYSLOG("RAMResources", "Unsupported X5000 image for texture placement");
+        }
+        else if (wantsRAMSurfaceRoute()) {
+            installRAMSurfaceRoute(patcher, id, slide, size);
+        }
+    }
 
     UInt32*           orgChannelTypes;
     mach_vm_address_t orgStartHWEngines;

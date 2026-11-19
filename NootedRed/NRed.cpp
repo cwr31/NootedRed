@@ -78,6 +78,8 @@ void NRed::init()
 
     VCNBridge::singleton().init();
 
+    X5000::singleton().init();
+
     lilu.onKextLoadForce(&kextRadeonX6000Framebuffer);
     lilu.onKextLoadForce(&kextRadeonX5000HWLibs);
     lilu.onKextLoadForce(&kextRadeonX5000);
