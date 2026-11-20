@@ -67,6 +67,48 @@ The build passed strict code signature verification. Local checks compared the g
 instructions and UUIDs against the reference kernel collection and exercised the selection
 and branch continuations in x86_64 harnesses.
 
+## Compare placements in one boot
+
+Comparisons across boots mix in driver, desktop, and clock changes. The
+[runtime switch](RAM-Placement.md#runtime-switch-and-counters) allows an A/B comparison
+in one boot. Build the benchmark once.
+
+```sh
+mkdir -p build/tools
+xcrun clang -fobjc-arc -O2 -framework Foundation -framework Metal -framework IOKit \
+  tools/ram_placement_bench.m -o build/tools/ram_placement_bench
+```
+
+Note the starting mask, then alternate placements.
+
+```sh
+sysctl debug.nred.ram
+sudo sysctl debug.nred.ram.enabled=0       # native placement for new resources
+build/tools/ram_placement_bench
+sudo sysctl debug.nred.ram.enabled=0x3f    # the starting mask noted above
+build/tools/ram_placement_bench
+```
+
+The benchmark allocates two private Metal buffers of 128 MiB each and reports which pool grew
+and which counter class took them. It then measures shader read, shader write, and blit copy
+bandwidth, and the time to create an 8 MiB private buffer and use it for the first and second
+time. Run each placement at least three times in alternating order and compare medians. The
+memory clock changes between runs, so the benchmark prints the sampled clocks with the results.
+
+For a desktop workload, change the switch, relaunch the workload so that its resources are
+allocated again, and record `sysctl debug.nred.ram` with the results. After changing the
+selectors, run `tools/test_ram_placement.py`, which compiles them from `X5000.cpp` against
+CPU stubs.
+
+On November 20, 2026, build `96A5B931-165B-34C0-9323-1CD501783425`, which predates the
+switch, ran the benchmark with all RAM options enabled. Both 128 MiB buffers went to system
+RAM: the system pool grew by 258–284 MiB while VRAM use changed by at most 0.1 MiB. Shader
+reads reached 25–28 GB/s in three runs with a sampled 800 MHz memory clock and 37 GB/s in one
+run at 1,333 MHz. Shader writes and blit copies stayed at 29–31 GB/s. Creating an 8 MiB
+buffer took 0.03–0.06 ms. Its first use took 2.4–2.8 ms of wall time, of which 0.25–0.29 ms
+was GPU time, and a second use took 0.40–0.49 ms. Preparing a new 8 MiB RAM buffer therefore
+cost about 2 ms at first use. The VRAM side of the comparison needs a build with the switch.
+
 ## Measure placement and capacity
 
 1. Compare the same workload with the options off and on. Instrument successful allocation
