@@ -22,7 +22,7 @@ working boot entry available. Replace `NootedRed.kext` on the EFI used for boot 
 arguments. Reboot from that EFI. The full test set uses these flags.
 
 ```text
--NRedRAMBuffers -NRedRAMTextures -NRedRAMHighColor -NRedRAMIOSurfaces -NRedRAMVideoPlanes -NRedRAMDepthStencil -NRedRAMComposition
+-NRedRAMBuffers -NRedRAMTextures -NRedRAMHighColor -NRedRAMVideoPlanes -NRedRAMDepthStencil -NRedRAMComposition
 ```
 
 Start with a boot with the switches off for a baseline. Compare each option by itself or use
@@ -38,7 +38,7 @@ kmutil showloaded --list-only | awk '/NootedRed|IOAcceleratorFamily2|AMDRadeonX5
 The `RAMBuffers` and `RAMResources` tags report installation results and the first matching
 resource. For example, `Texture allocation route installed` confirms the detour installed.
 `Selected system RAM path` for a texture reports a selector decision just before native
-allocation or page-in. `Allocated first Renoir data buffer in system RAM` reports the first
+allocation. `Allocated first Renoir data buffer in system RAM` reports the first
 successful redirected buffer allocation. Boot arguments alone establish configuration.
 On the reference boot, the available kernel logs did not show route-installation or selection
 messages, so placement remains unconfirmed.

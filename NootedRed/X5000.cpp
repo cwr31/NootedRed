@@ -135,9 +135,6 @@ namespace
     constexpr size_t kRAMCallOffset      = 0x174;
     constexpr size_t kRAMResultOffset    = 0x18B;
     constexpr size_t kAllocStoreOffset   = 0x1F2;
-    constexpr size_t kPageBranchOffset   = 0x143;
-    constexpr size_t kPageContinueOffset = 0x152;
-    constexpr size_t kPageReuseOffset    = 0x360;
     constexpr UInt8 kAllocBranch[] = {
         0x8B, 0x87, 0x90, 0x0C, 0x00, 0x00, 0x0F, 0xBA, 0xE0, 0x15, 0x0F, 0x82, 0xA3, 0x00, 0x00, 0x00,
     };
@@ -162,13 +159,6 @@ namespace
     constexpr UInt8 kDisplayFlipCheck[] = {
         0x41, 0xF6, 0x87, 0xB8, 0x01, 0x00, 0x00, 0x20, 0x0F, 0x84, 0x04, 0x04, 0x00, 0x00,
     };
-    constexpr UInt8 kPageBranch[] = {
-        0x41, 0x8B, 0x86, 0xB4, 0x01, 0x00, 0x00, 0x89, 0xC3, 0xC1, 0xEB, 0x1A, 0x83, 0xE3, 0x0F,
-    };
-    constexpr UInt8 kPageReuse[] = {
-        0x49, 0x8B, 0x06, 0x4C, 0x89, 0xF7, 0xBE, 0x01, 0x00, 0x00, 0x00, 0x4C, 0x89, 0xEA, 0x4C, 0x89,
-        0xE1, 0xFF, 0x90, 0x38, 0x03, 0x00, 0x00,
-    };
     constexpr size_t kBackingMemoryOffset  = 0x80;
     constexpr size_t kResourceFlagsOffset  = 0x0C;
     constexpr size_t kResourceSizeOffset   = 0xC8;
@@ -178,16 +168,14 @@ namespace
     constexpr size_t kSurfaceDCCOffset     = 0x1A0;
     constexpr size_t kTextureFlagsOffset   = 0x1B4;
     constexpr size_t kSurfaceFlagsOffset   = 0x1B8;
-    constexpr size_t kMappingMemoryOffset  = 0x18;
     constexpr UInt8  kStandardResourceType = 0x40;
-    constexpr UInt8  kSysMemSharedType     = 0x80;
-    constexpr UInt8  kIOSurfaceType        = 0x82;
     constexpr UInt8  kVidMemSharedType     = 0xC0;
     constexpr UInt32 kLinearCopyKind       = 1;
     constexpr UInt32 kDepthStencilCopyKind = 2;
     constexpr UInt32 kPrivateCopyKind      = 4;
     constexpr UInt32 kStagingCopyKind      = 8;
-    constexpr UInt32 kSkipStagingFlag      = 1U << 8U;
+    // pageon() copies a copy kind 8 texture with this flag through a temporary VRAM map.
+    constexpr UInt32 kStagedPageInFlag     = 1U << 8U;
     constexpr UInt32 kDeviceCacheFlag      = 1U << 2U;
     constexpr UInt8  kSurfaceInitialized   = 1U << 3U;
     // Display buffer, alternate system allocator options, external range.
@@ -198,7 +186,6 @@ namespace
 
     bool ramColorRequested{false};
     bool ramDepthStencilRequested{false};
-    bool ramIOSurfaceRequested{false};
     bool ramHighColorRequested{false};
     bool ramVideoPlanesRequested{false};
     bool ramCompositionRequested{false};
@@ -268,22 +255,9 @@ namespace
         return !hasSurfaceAuxStorage(resource);
     }
 
-    bool isIOSurfaceResource(void* const resource, const UInt8 type, const bool includeSysMemShared)
-    {
-        if (type == kIOSurfaceType) { return true; }
-        return (type == kVidMemSharedType || (includeSysMemShared && type == kSysMemSharedType))
-               && getMember<void*>(resource, kSharedSurfaceOffset) != nullptr;
-    }
-
     bool wantsRAMTextureAllocation()
     {
         return ramColorRequested || ramDepthStencilRequested || ramHighColorRequested || ramVideoPlanesRequested
-               || ramCompositionRequested;
-    }
-
-    bool wantsRAMSurfaceRoute()
-    {
-        return ramColorRequested || ramIOSurfaceRequested || ramHighColorRequested || ramVideoPlanesRequested
                || ramCompositionRequested;
     }
 
@@ -495,8 +469,6 @@ extern "C" {
 [[gnu::used]] static mach_vm_address_t nredRAMAllocContinue{0};
 [[gnu::used]] static mach_vm_address_t nredRAMAllocSystem{0};
 [[gnu::used]] static mach_vm_address_t nredRAMAllocResult{0};
-[[gnu::used]] static mach_vm_address_t nredRAMPageContinue{0};
-[[gnu::used]] static mach_vm_address_t nredRAMPageReuse{0};
 [[gnu::used]] static mach_vm_address_t nredScanoutLayoutReturn{0};
 
 [[gnu::used, gnu::noinline]] static IOReturn nredSelectScanoutLayout(
@@ -558,7 +530,7 @@ static bool nredRAMSelectComposition(void* const resource, void* const shared)
     const auto hasDeviceCache = (getMember<UInt32>(resource, kResourceFlagsOffset) & kDeviceCacheFlag) != 0;
     if (copyKind == kLinearCopyKind && format == ATIFormat::Rg8) {
         // The native page-in copies between the two prepared maps for this plane.
-        if (!ramVideoPlanesRequested || hasDeviceCache || cache != nullptr || (flags & kSkipStagingFlag) != 0
+        if (!ramVideoPlanesRequested || hasDeviceCache || cache != nullptr || (flags & kStagedPageInFlag) != 0
             || hasSurfaceAuxStorage(resource) || getMember<void*>(resource, kSurfaceDCCOffset) != nullptr)
         {
             return false;
@@ -643,47 +615,6 @@ static bool nredRAMSelectAllocation(void* const resource, void* const shared)
     return memory;
 }
 
-[[gnu::used, gnu::noinline]] static bool nredRAMReuseSurface(void* const resource, void* const mainMapping,
-                                                            void* const backingMapping)
-{
-    if (!isRenoirResource(resource) || mainMapping == nullptr || backingMapping == nullptr) { return false; }
-    const auto type = getMember<UInt8>(resource, kResourceTypeOffset);
-    const auto flags = getMember<UInt32>(resource, kTextureFlagsOffset);
-    if (textureCopyKind(flags) != kStagingCopyKind || (flags & kSkipStagingFlag) != 0) { return false; }
-
-    const auto kind = ramTextureKind(textureFormat(flags));
-    const auto standard = type == kStandardResourceType && useRAMTexture(resource, flags, kind);
-    const auto composition = type == kVidMemSharedType && __atomic_load_n(&ramCompositionReady, __ATOMIC_ACQUIRE);
-    const auto sharedEnabled = (kind == RAMTextureKind::Color8 && (ramIOSurfaceRequested || composition))
-                               || (kind == RAMTextureKind::HighColor && ramHighColorRequested)
-                               || (kind == RAMTextureKind::VideoPlane && ramVideoPlanesRequested);
-    const auto shared = sharedEnabled && isIOSurfaceResource(resource, type, kind != RAMTextureKind::Color8);
-    if (!standard && !shared) { return false; }
-
-    const auto* const main = getMember<OSObject*>(mainMapping, kMappingMemoryOffset);
-    const auto* const backing = getMember<OSObject*>(backingMapping, kMappingMemoryOffset);
-    if (!isRAMMemory(main) || !isRAMMemory(backing)) { return false; }
-
-    static volatile UInt32 loggedColor{0};
-    static volatile UInt32 loggedShared{0};
-    static volatile UInt32 loggedHighColor{0};
-    static volatile UInt32 loggedVideoPlane{0};
-    switch (kind) {
-        case RAMTextureKind::Color8:
-            logFirstRAMUse(standard ? loggedColor : loggedShared,
-                           standard ? "color texture page-in" : "IOSurface page-in");
-            break;
-        case RAMTextureKind::HighColor:
-            logFirstRAMUse(loggedHighColor, "high precision color page-in");
-            break;
-        case RAMTextureKind::VideoPlane:
-            logFirstRAMUse(loggedVideoPlane, "R/RG plane page-in");
-            break;
-        default: return false;
-    }
-    return true;
-}
-
 [[gnu::naked]] static void nredRAMAllocBranch()
 {
     asm volatile(
@@ -705,25 +636,6 @@ static bool nredRAMSelectAllocation(void* const resource, void* const shared)
         "2:\n"
         "jmpq *_nredRAMAllocResult(%rip)\n");
 }
-
-[[gnu::naked]] static void nredRAMPageBranch()
-{
-    asm volatile(
-        "movq %r14, %rdi\n"
-        "movq %r13, %rsi\n"
-        "movq %r12, %rdx\n"
-        "callq _nredRAMReuseSurface\n"
-        "movzbl %al, %r11d\n"
-        "movl 0x1b4(%r14), %eax\n"
-        "movl %eax, %ebx\n"
-        "shrl $26, %ebx\n"
-        "andl $15, %ebx\n"
-        "testl %r11d, %r11d\n"
-        "jnz 1f\n"
-        "jmpq *_nredRAMPageContinue(%rip)\n"
-        "1:\n"
-        "jmpq *_nredRAMPageReuse(%rip)\n");
-}
 }
 
 void X5000::init()
@@ -731,7 +643,6 @@ void X5000::init()
     this->ramBuffersRequested = checkKernelArgument("-NRedRAMBuffers");
     ramColorRequested         = checkKernelArgument("-NRedRAMTextures");
     ramDepthStencilRequested  = checkKernelArgument("-NRedRAMDepthStencil");
-    ramIOSurfaceRequested     = checkKernelArgument("-NRedRAMIOSurfaces");
     ramHighColorRequested     = checkKernelArgument("-NRedRAMHighColor");
     ramVideoPlanesRequested   = checkKernelArgument("-NRedRAMVideoPlanes");
     ramCompositionRequested   = checkKernelArgument("-NRedRAMComposition");
@@ -837,26 +748,6 @@ namespace
         const auto installed = routeRAMBranch(patcher, id, function + kAllocBranchOffset, nredRAMAllocBranch);
         SYSLOG("RAMResources", "Texture allocation route %s", installed ? "installed" : "failed");
     }
-
-    bool installRAMSurfaceRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
-                                const size_t size)
-    {
-        const auto function = patcher.solveSymbol(
-            id, "__ZN31AMDRadeonX5000_AMDAccelResource6pageonEP12IOAccelEventby", slide, size);
-        patcher.clearError();
-        if (!matchesCode(function, slide, size, kPageBranchOffset, kPageBranch)
-            || !matchesCode(function, slide, size, kPageReuseOffset, kPageReuse))
-        {
-            SYSLOG("RAMResources", "Unsupported X5000 surface page-in path");
-            return false;
-        }
-
-        nredRAMPageContinue = function + kPageContinueOffset;
-        nredRAMPageReuse    = function + kPageReuseOffset;
-        const auto installed = routeRAMBranch(patcher, id, function + kPageBranchOffset, nredRAMPageBranch);
-        SYSLOG("RAMResources", "Surface page-in route %s", installed ? "installed" : "failed");
-        return installed;
-    }
 }
 
 void X5000::installRAMBufferRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
@@ -931,19 +822,16 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
 
     NRed::singleton().hwLateInit();
 
-    if (wantsRAMTextureAllocation() || wantsRAMSurfaceRoute()) {
+    if (wantsRAMTextureAllocation()) {
         const auto verified = matchesImage(slide, size, kX5000UUID);
         __atomic_store_n(&ramX5000Verified, verified, __ATOMIC_RELEASE);
         if (!verified) {
             SYSLOG("RAMResources", "Unsupported X5000 image for texture placement");
         }
-        else if (wantsRAMSurfaceRoute()) {
-            const auto pagingReady = installRAMSurfaceRoute(patcher, id, slide, size);
-            if (ramCompositionRequested) {
-                const auto protectedFlip = pagingReady && installRAMCompositionGuard(patcher, id, slide, size);
-                __atomic_store_n(&ramCompositionReady, protectedFlip, __ATOMIC_RELEASE);
-                SYSLOG("RAMResources", "Composition cache RAM placement %s", protectedFlip ? "enabled" : "disabled");
-            }
+        else if (ramCompositionRequested) {
+            const auto protectedFlip = installRAMCompositionGuard(patcher, id, slide, size);
+            __atomic_store_n(&ramCompositionReady, protectedFlip, __ATOMIC_RELEASE);
+            SYSLOG("RAMResources", "Composition cache RAM placement %s", protectedFlip ? "enabled" : "disabled");
         }
     }
 
