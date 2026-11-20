@@ -48,6 +48,7 @@
 #include <libkern/OSTypes.h>
 #include <libkern/OSAtomic.h>
 #include <libkern/c++/OSObject.h>
+#include <libkern/c++/OSSymbol.h>
 #include <mach/i386/vm_param.h>
 #include <mach/i386/vm_types.h>
 #include <mach/kern_return.h>
@@ -193,19 +194,39 @@ namespace
     bool ramX5000Verified{false};
     bool scanoutLayoutRequested{false};
     mach_vm_address_t orgGetDisplayFlip{0};
+    const OSMetaClass* acceleratorClass{nullptr};
+    const OSMetaClass* sysMemoryClass{nullptr};
+    const OSMetaClass* deviceCacheClass{nullptr};
 
     bool isRenoirResource(void* const resource)
     {
         const auto& nred = NRed::singleton();
         if (resource == nullptr || nred.getIGPU() == nullptr || !nred.getAttributes().isRenoir()) { return false; }
         const auto* const accelerator = getMember<IOService*>(resource, kAcceleratorOffset);
-        return accelerator != nullptr && accelerator->getProvider() == nred.getIGPU()
-               && accelerator->metaCast("AMDRadeonX5000_AMDVega10GraphicsAccelerator") != nullptr;
+        const auto* const expected = __atomic_load_n(&acceleratorClass, __ATOMIC_ACQUIRE);
+        return accelerator != nullptr && expected != nullptr && accelerator->getProvider() == nred.getIGPU()
+               && accelerator->metaCast(expected) != nullptr;
     }
 
     bool isRAMMemory(const OSObject* const memory)
     {
-        return memory != nullptr && memory->metaCast("IOAccelSysMemory") != nullptr;
+        const auto* const expected = __atomic_load_n(&sysMemoryClass, __ATOMIC_ACQUIRE);
+        return memory != nullptr && expected != nullptr && memory->metaCast(expected) != nullptr;
+    }
+
+    bool isDeviceCache(const OSObject* const cache)
+    {
+        // IOSurface is not one of the patched kexts, so look its metaclass up by name once.
+        auto* expected = __atomic_load_n(&deviceCacheClass, __ATOMIC_ACQUIRE);
+        if (expected == nullptr) {
+            const auto* const name = OSSymbol::withCStringNoCopy("IOSurfaceDeviceCache");
+            if (name == nullptr) { return false; }
+            expected = OSMetaClass::getMetaClassWithName(name);
+            name->release();
+            if (expected == nullptr) { return false; }
+            __atomic_store_n(&deviceCacheClass, expected, __ATOMIC_RELEASE);
+        }
+        return cache != nullptr && cache->metaCast(expected) != nullptr;
     }
 
     ATIFormat textureFormat(const UInt32 flags) { return static_cast<ATIFormat>(flags & 0xFF); }
@@ -537,8 +558,7 @@ static bool nredRAMSelectComposition(void* const resource, void* const shared)
         }
     }
     else if (shared != nullptr || !hasDeviceCache || copyKind != kStagingCopyKind
-             || ramTextureKind(format) != RAMTextureKind::Color8 || cache == nullptr
-             || cache->metaCast("IOSurfaceDeviceCache") == nullptr)
+             || ramTextureKind(format) != RAMTextureKind::Color8 || !isDeviceCache(cache))
     {
         return false;
     }
@@ -814,6 +834,13 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
     if ((this->ramBuffersRequested || wantsRAMTextureAllocation())
         && kextIOAcceleratorFamily2.loadIndex == id)
     {
+        const auto memoryClass = patcher.solveSymbol(id, "__ZN16IOAccelSysMemory10gMetaClassE", slide, size);
+        patcher.clearError();
+        if (memoryClass == 0) {
+            SYSLOG("RAMResources", "IOAccelSysMemory metaclass unavailable");
+            return;
+        }
+        __atomic_store_n(&sysMemoryClass, reinterpret_cast<const OSMetaClass*>(memoryClass), __ATOMIC_RELEASE);
         if (this->ramBuffersRequested) { this->installRAMBufferRoute(patcher, id, slide, size); }
         if (wantsRAMTextureAllocation()) { installRAMTextureRoute(patcher, id, slide, size); }
         return;
@@ -822,6 +849,14 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
 
     NRed::singleton().hwLateInit();
 
+    if (this->ramBuffersRequested || wantsRAMTextureAllocation()) {
+        // The selectors only accept resources owned by this accelerator class.
+        const auto metaClass = patcher.solveSymbol(
+            id, "__ZN43AMDRadeonX5000_AMDVega10GraphicsAccelerator10gMetaClassE", slide, size);
+        patcher.clearError();
+        if (metaClass == 0) { SYSLOG("RAMResources", "Renoir accelerator metaclass unavailable"); }
+        __atomic_store_n(&acceleratorClass, reinterpret_cast<const OSMetaClass*>(metaClass), __ATOMIC_RELEASE);
+    }
     if (wantsRAMTextureAllocation()) {
         const auto verified = matchesImage(slide, size, kX5000UUID);
         __atomic_store_n(&ramX5000Verified, verified, __ATOMIC_RELEASE);
