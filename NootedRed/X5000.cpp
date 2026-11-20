@@ -229,6 +229,11 @@ namespace
         DepthStencil,
         Composition,
         CompositionPlane,
+        // Standard textures that an enabled policy would take except for one property, so they stay native.
+        DeclinedBacking,
+        DeclinedParams,
+        DeclinedAux,
+        DeclinedFormat,
         Count,
     };
 
@@ -269,24 +274,31 @@ namespace
                 handleRAMEnabled, "IU", "Placement classes used for new allocations");
     SYSCTL_OID(_debug_nred_ram, OID_AUTO, available, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, &ramAvailable, 0,
                sysctl_handle_int, "IU", "Placement classes with installed hooks");
+    // sysctl name and RAMClass of every counter pair.
+#define NRED_RAM_CLASSES(X)                \
+    X(buffer, Buffer);                     \
+    X(private, Private);                   \
+    X(color, Color);                       \
+    X(highcolor, HighColor);               \
+    X(videoplane, VideoPlane);             \
+    X(depthstencil, DepthStencil);         \
+    X(composition, Composition);           \
+    X(compositionplane, CompositionPlane); \
+    X(declined_backing, DeclinedBacking);  \
+    X(declined_params, DeclinedParams);    \
+    X(declined_aux, DeclinedAux);          \
+    X(declined_format, DeclinedFormat)
     // SYSCTL_QUAD adds a zero-length array size check, so declare the read-only counters directly.
 #define NRED_RAM_QUAD(name, value, description)                                                           \
     SYSCTL_OID(_debug_nred_ram, OID_AUTO, name, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, value, 0,      \
                sysctl_handle_quad, "Q", description)
 #define NRED_RAM_COUNTERS(name, ramClass)                                                                 \
     NRED_RAM_QUAD(name##_count, &ramCounters[static_cast<size_t>(RAMClass::ramClass)].count,              \
-                  "Allocations placed in RAM");                                                           \
+                  "Allocations in this class");                                                           \
     NRED_RAM_QUAD(name##_bytes, &ramCounters[static_cast<size_t>(RAMClass::ramClass)].bytes,              \
-                  "Page-rounded bytes placed in RAM")
+                  "Page-rounded bytes in this class")
     NRED_RAM_QUAD(failures, &ramFailures, "RAM attempts that fell back to the native path");
-    NRED_RAM_COUNTERS(buffer, Buffer);
-    NRED_RAM_COUNTERS(private, Private);
-    NRED_RAM_COUNTERS(color, Color);
-    NRED_RAM_COUNTERS(highcolor, HighColor);
-    NRED_RAM_COUNTERS(videoplane, VideoPlane);
-    NRED_RAM_COUNTERS(depthstencil, DepthStencil);
-    NRED_RAM_COUNTERS(composition, Composition);
-    NRED_RAM_COUNTERS(compositionplane, CompositionPlane);
+    NRED_RAM_CLASSES(NRED_RAM_COUNTERS);
 #undef NRED_RAM_COUNTERS
 #undef NRED_RAM_QUAD
 
@@ -301,26 +313,16 @@ namespace
             &sysctl__debug_nred_ram_enabled,
             &sysctl__debug_nred_ram_available,
             &sysctl__debug_nred_ram_failures,
-            &sysctl__debug_nred_ram_buffer_count,
-            &sysctl__debug_nred_ram_buffer_bytes,
-            &sysctl__debug_nred_ram_private_count,
-            &sysctl__debug_nred_ram_private_bytes,
-            &sysctl__debug_nred_ram_color_count,
-            &sysctl__debug_nred_ram_color_bytes,
-            &sysctl__debug_nred_ram_highcolor_count,
-            &sysctl__debug_nred_ram_highcolor_bytes,
-            &sysctl__debug_nred_ram_videoplane_count,
-            &sysctl__debug_nred_ram_videoplane_bytes,
-            &sysctl__debug_nred_ram_depthstencil_count,
-            &sysctl__debug_nred_ram_depthstencil_bytes,
-            &sysctl__debug_nred_ram_composition_count,
-            &sysctl__debug_nred_ram_composition_bytes,
-            &sysctl__debug_nred_ram_compositionplane_count,
-            &sysctl__debug_nred_ram_compositionplane_bytes,
         };
         // Parents precede their children.
         for (auto* const control : controls) { sysctl_register_oid(control); }
+#define NRED_RAM_REGISTER(name, ramClass)                        \
+    sysctl_register_oid(&sysctl__debug_nred_ram_##name##_count); \
+    sysctl_register_oid(&sysctl__debug_nred_ram_##name##_bytes)
+        NRED_RAM_CLASSES(NRED_RAM_REGISTER);
+#undef NRED_RAM_REGISTER
     }
+#undef NRED_RAM_CLASSES
 
     bool isRenoirResource(void* const resource)
     {
@@ -384,23 +386,31 @@ namespace
         return false;
     }
 
+    // Formatted textures arrive with their backing and optional surface parameters already set. The policy
+    // keeps the ones whose properties it cannot take over native and reports the first such property.
     RAMClass useRAMTexture(void* const resource, const UInt32 flags, const RAMTextureKind kind)
     {
-        if (textureCopyKind(flags) == kDepthStencilCopyKind
-            || getMember<void*>(resource, kSurfaceParamsOffset) != nullptr)
-        {
-            return RAMClass::None;
-        }
+        auto selected = RAMClass::Color;
+        auto policy   = kRAMTextures;
+        auto plain    = false;
         switch (kind) {
-            case RAMTextureKind::Color8: return ramPolicyEnabled(kRAMTextures) ? RAMClass::Color : RAMClass::None;
+            case RAMTextureKind::Color8: break;
             case RAMTextureKind::HighColor:
-                return ramPolicyEnabled(kRAMHighColor) && !hasSurfaceAuxStorage(resource) ? RAMClass::HighColor :
-                                                                                            RAMClass::None;
+                selected = RAMClass::HighColor;
+                policy   = kRAMHighColor;
+                plain    = true;
+                break;
             case RAMTextureKind::VideoPlane:
-                return ramPolicyEnabled(kRAMVideoPlanes) && !hasSurfaceAuxStorage(resource) ? RAMClass::VideoPlane :
-                                                                                              RAMClass::None;
-            default: return RAMClass::None;
+                selected = RAMClass::VideoPlane;
+                policy   = kRAMVideoPlanes;
+                plain    = true;
+                break;
+            default: return RAMClass::DeclinedFormat;
         }
+        if (!ramPolicyEnabled(policy) || textureCopyKind(flags) == kDepthStencilCopyKind) { return RAMClass::None; }
+        if (getMember<void*>(resource, kBackingMemoryOffset) != nullptr) { return RAMClass::DeclinedBacking; }
+        if (getMember<void*>(resource, kSurfaceParamsOffset) != nullptr) { return RAMClass::DeclinedParams; }
+        return plain && hasSurfaceAuxStorage(resource) ? RAMClass::DeclinedAux : selected;
     }
 
     bool wantsRAMTextureAllocation() { return (ramRequested & kRAMResourcePolicies) != 0; }
@@ -711,32 +721,34 @@ static RAMClass nredRAMSelectAllocation(void* const resource, void* const shared
         return RAMClass::None;
     }
 
-    const auto flags = getMember<UInt32>(resource, kTextureFlagsOffset);
+    const auto        flags   = getMember<UInt32>(resource, kTextureFlagsOffset);
+    const auto        format  = textureFormat(flags);
     const auto* const backing = getMember<OSObject*>(resource, kBackingMemoryOffset);
 
     // Private textures and Metal buffers use this copy path before their format is set.
     // Preserve the backing object and let the driver keep ownership of both allocations.
-    if ((flags & 0xFF) == 0 && textureCopyKind(flags) == kPrivateCopyKind) {
-        return ramPolicyEnabled(kRAMTextures) && getMember<void*>(resource, kSurfaceParamsOffset) == nullptr
-                       && isRAMMemory(backing) ?
+    if (format == ATIFormat::Null) {
+        return textureCopyKind(flags) == kPrivateCopyKind && ramPolicyEnabled(kRAMTextures)
+                       && getMember<void*>(resource, kSurfaceParamsOffset) == nullptr && isRAMMemory(backing) ?
                    RAMClass::Private :
                    RAMClass::None;
     }
-    if (backing != nullptr) { return RAMClass::None; }
 
-    if (ramPolicyEnabled(kRAMDepthStencil) && textureCopyKind(flags) == kDepthStencilCopyKind) {
-        switch (textureFormat(flags)) {
+    if (textureCopyKind(flags) == kDepthStencilCopyKind) {
+        if (!ramPolicyEnabled(kRAMDepthStencil)) { return RAMClass::None; }
+        if (backing != nullptr) { return RAMClass::DeclinedBacking; }
+        switch (format) {
             case ATIFormat::Depth16:
             case ATIFormat::Depth24Stencil8:
             case ATIFormat::Depth32:
             case ATIFormat::Depth32F:
             case ATIFormat::Depth32fStencil8:
             case ATIFormat::Stencil8: return RAMClass::DepthStencil;
-            default: return RAMClass::None;
+            default: return RAMClass::DeclinedFormat;
         }
     }
 
-    return useRAMTexture(resource, flags, ramTextureKind(textureFormat(flags)));
+    return useRAMTexture(resource, flags, ramTextureKind(format));
 }
 
 [[gnu::used, gnu::noinline]] static void* nredRAMAllocatePrimary(void* const accelerator, void* const resource,
@@ -747,10 +759,14 @@ static RAMClass nredRAMSelectAllocation(void* const resource, void* const shared
 
     const auto bytes = getMember<UInt64>(resource, kResourceSizeOffset);
     if (bytes == 0 || bytes > UINT64_MAX - PAGE_MASK) { return nullptr; }
+    const auto aligned = (bytes + PAGE_MASK) & ~static_cast<UInt64>(PAGE_MASK);
+    if (ramClass >= RAMClass::DeclinedBacking) {
+        countRAMAllocation(ramClass, true, aligned);
+        return nullptr;
+    }
 
     // Match allocMemory's direct system allocation for ordinary resources. The native
     // continuation records the successful result and a failed attempt leaves the slots intact.
-    const auto aligned = (bytes + PAGE_MASK) & ~static_cast<UInt64>(PAGE_MASK);
     auto* const memory = createRAMPrimary(accelerator, nullptr, shared, resource, 0x363, aligned, true);
     countRAMAllocation(ramClass, memory != nullptr, aligned);
     if (memory != nullptr) {

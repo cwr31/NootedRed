@@ -165,20 +165,49 @@ void testStandardResources() {
         check(select(resource) == c.expected, c.label);
         enable(all);
         resource.at<OSObject*>(kBackingMemoryOffset) = &ramMemory;
-        check(select(resource) == RAMClass::None, "formatted texture with a backing stays native");
+        check(select(resource) == RAMClass::DeclinedBacking, "formatted texture with a backing stays native");
     }
 
     Resource depthColor(kStandardResourceType, textureFlags(ATIFormat::BGRA8, kDepthStencilCopyKind));
     enable(all);
-    check(select(depthColor) == RAMClass::None, "color format on the depth path stays native");
+    check(select(depthColor) == RAMClass::DeclinedFormat, "color format on the depth path stays native");
     Resource highColor(kStandardResourceType, textureFlags(ATIFormat::RGBA16F, kLinearCopyKind));
     highColor.at<void*>(kSurfaceAuxOffsets[0]) = &shared;
-    check(select(highColor) == RAMClass::None, "high color with auxiliary storage stays native");
+    check(select(highColor) == RAMClass::DeclinedAux, "high color with auxiliary storage stays native");
     Resource color(kStandardResourceType, textureFlags(ATIFormat::BGRA8, kLinearCopyKind));
     color.at<void*>(kSurfaceAuxOffsets[0]) = &shared;
     check(select(color) == RAMClass::Color, "8-bit color ignores auxiliary storage as before");
     Resource other(0x82, textureFlags(ATIFormat::BGRA8, kLinearCopyKind));
     check(select(other) == RAMClass::None, "IOSurface resource type stays native");
+}
+
+void testDeclines() {
+    constexpr UInt32 all = kRAMBuffers | kRAMResourcePolicies;
+    enable(all);
+    Resource color(kStandardResourceType, textureFlags(ATIFormat::BGRA8, kLinearCopyKind));
+    color.at<void*>(kSurfaceParamsOffset) = &shared;
+    check(select(color) == RAMClass::DeclinedParams, "texture with surface parameters is reported");
+    color.at<OSObject*>(kBackingMemoryOffset) = &videoMemory;
+    check(select(color) == RAMClass::DeclinedBacking, "a backing is reported before surface parameters");
+    enable(all & ~kRAMTextures);
+    check(select(color) == RAMClass::None, "a disabled class is not reported");
+    enable(all);
+
+    Resource plane(kStandardResourceType, textureFlags(ATIFormat::Rg16, kLinearCopyKind));
+    plane.at<void*>(kSurfaceAuxOffsets[1]) = &shared;
+    check(select(plane) == RAMClass::DeclinedAux, "plane with auxiliary storage is reported");
+
+    Resource compressed(kStandardResourceType, textureFlags(ATIFormat::RGBADxt5, kLinearCopyKind));
+    check(select(compressed) == RAMClass::DeclinedFormat, "format without a class is reported");
+    Resource unformatted(kStandardResourceType, textureFlags(ATIFormat::Null, kLinearCopyKind));
+    check(select(unformatted) == RAMClass::None, "unformatted resource is not a texture");
+    Resource depth(kStandardResourceType, textureFlags(ATIFormat::Depth32F, kDepthStencilCopyKind));
+    depth.at<OSObject*>(kBackingMemoryOffset) = &ramMemory;
+    check(select(depth) == RAMClass::DeclinedBacking, "depth texture with a backing is reported");
+    Resource colorDepth(kStandardResourceType, textureFlags(ATIFormat::RGBA16F, kDepthStencilCopyKind));
+    check(select(colorDepth) == RAMClass::DeclinedFormat, "color format on the depth path is reported");
+    enable(all & ~kRAMDepthStencil);
+    check(select(colorDepth) == RAMClass::None, "depth path follows its switch");
 }
 
 void testComposition() {
@@ -261,6 +290,7 @@ void testCounters() {
 
 int main() {
     testStandardResources();
+    testDeclines();
     testComposition();
     testRuntimeSwitch();
     testCounters();

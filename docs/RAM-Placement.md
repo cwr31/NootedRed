@@ -52,6 +52,7 @@ Once a placement hook is installed, `sysctl debug.nred.ram` shows the runtime st
 | `enabled` | Bit mask of the classes used for new allocations. It starts with the classes requested by boot arguments. |
 | `available` | Classes whose hooks are installed. `enabled` rejects other bits with `EINVAL`. |
 | `<class>_count`, `<class>_bytes` | Allocations placed in system RAM since boot, and their size rounded up to whole pages. |
+| `declined_<reason>_count`, `declined_<reason>_bytes` | Textures that an enabled class would have taken, except for one property that keeps them native. See [Textures that stay native](#textures-that-stay-native). |
 | `failures` | RAM attempts that fell back to the native path. |
 
 | Bit | Counter classes | Boot argument |
@@ -164,6 +165,25 @@ segment limit at zero. Raising the reported size would require changing the VRAM
 `get_config()` output.
 One segment could then reference more than the fixed pool holds while some of its resources
 remain in VRAM, so that change needs its own design and testing.
+
+### Textures that stay native
+
+The `declined_*` counters list textures that an enabled class would have taken, except for one
+property. They are reported in this order, and only the first matching reason is counted.
+
+| Reason | Property |
+| --- | --- |
+| `declined_backing` | The resource already has a system memory backing. Private resources are exempt when that backing is RAM. |
+| `declined_params` | The client passed surface parameters when it created the resource. |
+| `declined_aux` | A high-color or plane texture has auxiliary storage. |
+| `declined_format` | The format belongs to no enabled class, for example compressed or 32-bit float formats. |
+
+On the build before the counters existed, OpenGL textures stayed in VRAM while the same
+formats went to RAM through Metal. Uploaded textures carry a RAM backing of the same size, and
+render targets carry none. `tools/gl_texture_probe.py` creates both kinds, and the counters
+show which property keeps each one native. Surface parameters and compression metadata may
+constrain where the GPU can address the data, so the policy does not take such textures
+before the counters and a hardware test show that it is safe.
 
 The counters report placement per class. Page-in and copy bytes are not counted yet. Measure
 them before widening the format or hardware coverage. The functional smoke results and the separate

@@ -119,6 +119,17 @@ managed buffers and textures, private textures in formats outside the format cla
 private placement heap, and IOSurface-backed textures. The VRAM side of the comparison
 therefore needs a build with the switch.
 
+## Check OpenGL textures
+
+`tools/gl_texture_probe.py` creates OpenGL textures and prints how the accelerator's VRAM and
+system memory use changed, together with the counters that moved. Run it with all classes
+enabled and read the `declined_*` counters to see which property keeps each kind of texture
+native.
+
+```sh
+python3 tools/gl_texture_probe.py
+```
+
 ## Measure placement and capacity
 
 1. Compare the same workload with the options off and on. Instrument successful allocation
