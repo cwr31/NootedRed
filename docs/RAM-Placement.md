@@ -22,11 +22,12 @@ setup and a test matrix. Color and plane format names below refer to the X5000
 | Option | New allocation | Page-in |
 | --- | --- | --- |
 | `-NRedRAMBuffers` | Routes new `Data` buffers that prefer VRAM to the native system RAM allocator. | Original driver path. |
-| `-NRedRAMTextures` | Routes eligible standard `BGRA8` and `RGBA8` textures, including eligible color attachments, to system RAM. | Skips temporary VRAM for qualifying standard textures when both prepared maps use system RAM. |
+| `-NRedRAMTextures` | Prefers RAM for eligible standard private textures and Metal buffers during their first primary allocation. Also covers eligible standard `BGRA8` and `RGBA8` textures after format initialization. | Skips temporary VRAM for qualifying standard textures when both prepared maps use system RAM. |
 | `-NRedRAMHighColor` | Extends that allocation policy to `BGRA16F`, `RGBA16F`, `BGRA1010102`, and `RGBA1010102`. | Covers qualifying standard and IOSurface resources in those formats. |
 | `-NRedRAMVideoPlanes` | Extends that allocation policy to `R8`, `Rg8`, `R16`, and `Rg16` textures. | Covers qualifying standard and IOSurface resources in those formats. |
 | `-NRedRAMDepthStencil` | Routes qualifying standard `Depth16`, `Depth24Stencil8`, `Depth32`, `Depth32F`, `Depth32fStencil8`, and `Stencil8` resources on the depth/stencil path to system RAM. | Original driver path. |
 | `-NRedRAMIOSurfaces` | Original driver path for IOSurface creation. | Skips temporary VRAM for qualifying `BGRA8` and `RGBA8` IOSurfaces when both prepared maps use system RAM. |
+| `-NRedRAMComposition` | Prefers RAM for new `BGRA8` and `RGBA8` device caches without direct display eligibility. With `-NRedRAMVideoPlanes`, it also covers non-display `Rg8` IOSurface planes on the linear copy path with no device cache, auxiliary storage, or DCC metadata. | Uses the prepared system RAM maps when possible. |
 
 The video-plane option operates on texture formats rather than a Core Video pixel-buffer
 identifier or codec. NV12 and P010 plane views are relevant workloads. Direct allocation of
@@ -44,9 +45,14 @@ See [NRed.cpp](../NootedRed/NRed.cpp), [Kexts.cpp](../NootedRed/Kexts.cpp), and
 
 | Hook | Policy and continuation |
 | --- | --- |
-| `IOAccelResource2::allocDataBufferMemory()` | Wraps the original method and passes `preferVRAM=false` for an eligible resource. The selector requires type `0x0A`, a shared context, an original VRAM preference, and an empty primary memory slot. The driver's original method performs allocation and returns its result. |
-| `IOAccelResource2::allocMemory()` | At the allocation branch, it selects the driver's native system-memory path for eligible type `0x40` resources with empty primary and backing memory slots. For color and plane formats, the surface parameter pointer must be empty. High-precision and plane formats also require empty auxiliary slots. Depth and stencil formats instead require the matching depth/stencil copy path. Other requests follow the original allocation branch. |
+| `IOAccelResource2::allocDataBufferMemory()` | Calls the driver with `preferVRAM=false` for a new type `0x0A` data buffer that prefers VRAM. If the call fails, retries with the original preference. |
+| `IOAccelResource2::allocMemory()` | Prefers system RAM for eligible type `0x40` resources with an empty primary slot. Private textures and Metal buffers arrive with copy kind `4`, an unset format and a system RAM backing. The driver keeps that backing and records the new primary allocation itself. Resources whose formats are already available use the format checks. A failed RAM attempt resumes the native VRAM path. |
 | `AMDRadeonX5000_AMDAccelResource::pageon()` | Evaluates the texture after both maps have been prepared. For copy kind `8`, with texture flag bit `8` clear, it can skip the temporary VRAM map when both maps reference `IOAccelSysMemory`. It rejoins the driver's normal `pageTexture()` logic, which can still perform layout or format copies. Each map may refer to a distinct system memory object. |
+
+The composition route requires the reference driver images and a verified display flip guard.
+It preserves the IOSurface backing and lets the driver allocate and map a separate RAM cache.
+The display guard declines direct output if either input is a `0xC0` cache with RAM as its
+primary memory. X5000 handles normal output through its existing display buffers.
 
 The IOSurface selector uses the `0x82` resource type or a shared resource with a surface
 reference. The 8-bit IOSurface option permits shared type `0xC0`. The high-color and video-plane
@@ -67,7 +73,7 @@ of the macOS version string.
 | Path | Reference sites and checks |
 | --- | --- |
 | Data buffer wrapper | Checks the function entry, existing-memory branch at `+0x89`, and native allocation sequence at `+0xA8`. Resolves the relative call and verifies that it targets `IOAccelSysMemory::withOptions()`. |
-| Texture branch | Requires both reference UUIDs for selection. Checks the instructions at `allocMemory()+0x27` and the system RAM continuation at `+0xDA`. The trampoline preserves the original bit-21 decision for other requests and resumes their VRAM path at `+0x37`. For eligible requests it clears bit 26 in the local register to select the direct system-memory branch. The shared accelerator configuration field is read from object offset `0xC90`. |
+| Primary allocation | Requires both reference UUIDs for selection. Verifies `allocMemory()+0x27`, the native RAM branch and allocator call, and the result and storage instructions. When accelerator bit 21 already selects RAM, resumes the original RAM branch at `+0xDA`. A successful new RAM allocation resumes at `+0x18B` with the memory object in `rax`. Declined or failed attempts resume at `+0x37`. |
 | Surface branch | Requires the reference X5000 UUID. Checks `pageon()+0x143` and the reuse target at `+0x360`. The trampoline reconstructs the texture flag calculation and resumes the original decision at `+0x152` when the selector declines. |
 
 The resource type, owning accelerator, backing memory, and primary memory fields are at `0x14`,
@@ -88,8 +94,8 @@ failure leaves the corresponding original driver path in use.
 ## Remaining VRAM use and limits
 
 Display scanout, cursor and display firmware reservations, some GPU virtual-memory allocations,
-and internal blit buffers have separate allocation paths. Unsupported formats, independent
-compression metadata, and other texture routes continue through the native driver. The
+and internal blit buffers have separate allocation paths. IOSurface device caches that are
+eligible for display scanout use the original allocator. The
 system-memory wire limit and GPU address-space availability also constrain the workloads
 that can stay in RAM. The firmware reservation and overall UMA budget remain under the
 original driver policy.

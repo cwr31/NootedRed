@@ -1,6 +1,6 @@
 # Renoir RAM testing and rollback
 
-The six boot options in [RAM-Placement.md](RAM-Placement.md) are experimental. The reference
+The boot options in [RAM-Placement.md](RAM-Placement.md) are experimental. The reference
 configuration is macOS Tahoe 26.7.2 build `25G332` on x86_64 Renoir with a 512 MiB UMA
 reservation. The [placement design](RAM-Placement.md#reference-images-and-abi) lists the
 expected Apple driver UUIDs.
@@ -22,7 +22,7 @@ working boot entry available. Replace `NootedRed.kext` on the EFI used for boot 
 arguments. Reboot from that EFI. The full test set uses these flags.
 
 ```text
--NRedRAMBuffers -NRedRAMTextures -NRedRAMHighColor -NRedRAMIOSurfaces -NRedRAMVideoPlanes -NRedRAMDepthStencil
+-NRedRAMBuffers -NRedRAMTextures -NRedRAMHighColor -NRedRAMIOSurfaces -NRedRAMVideoPlanes -NRedRAMDepthStencil -NRedRAMComposition
 ```
 
 Start with a boot with the switches off for a baseline. Compare each option by itself or use
@@ -81,9 +81,38 @@ and branch continuations in x86_64 harnesses.
    distinguish locked system and video memory. Keep per-resource evidence when the workload
    and desktop are sharing those counters.
 
-The recorded smoke runs establish successful output. A measured working set above 512 MiB,
-actual backing placement, copy reduction, and changes in desktop or editor performance
-remain open acceptance checks.
+The November 19, 2026 follow-up boot loaded build `1815B079-4FFF-38EB-863E-B093CF63F464`.
+Allocation traces showed 39 private textures across 13 formats, 20 large private textures,
+and 20 Metal private buffers taking the new RAM path. A separate trace followed two RAM
+allocations through wiring and into the GPU page table. The 633 MiB texture workload passed
+eight timed full-image verification rounds. The 640 MiB buffer workload passed 100 rounds.
+The shared and managed IOSurface readback tests also passed with the native cache allocator.
+
+The physical 3840×2160 display stayed online. Three animated 2112×1188 windows presented
+at about 42–43 FPS each. With three 3456×1944 windows they presented at about 17 FPS each.
+The larger run still showed IOSurface paging and VRAM eviction waits. The tests added no
+panic or GPU restart report. The window results describe this boot and workload. They do
+not establish a controlled comparison against the previous kext.
+
+On November 20, 2026, build `DA95A878-3A09-3F6C-A653-A2DD6F906CF3` booted with
+`-NRedRAMComposition` on the same 4K 60 Hz display. Both IOSurface readback tests and
+the 633 MiB private texture test passed eight timed rounds each. No GPU recovery or
+new panic report appeared during the runs.
+
+With three animated 3456×1944 windows, eight composition caches of about 27 MiB each
+were allocated in system RAM. The trace followed the new allocations into the GPU
+page tables. The native flip path still requested physical addresses from VRAM.
+The test did not exercise a RAM cache later becoming eligible for direct output.
+
+Window presentation with two drawables per window was about 16–18 FPS per window
+across the new runs, versus about 18 FPS in the prior run with the same parameters.
+The old trace counted 313 calls to reclaim VRAM during the test. The new trace counted
+zero, and roughly 286–298 MiB of the reserved VRAM stayed free. In an untraced repeat,
+the application command buffers took 1.3–1.5 ms to execute at the 95th percentile,
+after about 90–101 ms of waiting between scheduling and GPU execution. These are
+application measurements. They do not isolate where the compositor or GPU spends
+that interval. Raising the test app's drawable count to three produced 18.5–19.5
+FPS per window in two runs, with a longer delay before presentation.
 
 ## Roll back
 
