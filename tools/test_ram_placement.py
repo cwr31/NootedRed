@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the Renoir RAM placement selectors and runtime switch on CPU stubs.
 
-The selectors, counters and debug.nred.ram.enabled handler are compiled from
-NootedRed/X5000.cpp against fake resource objects. Kernel objects, IOKit and the
+The selectors, counters, Metal budget and debug.nred.ram.enabled handler are compiled
+from NootedRed/X5000.cpp against fake resource objects. Kernel objects, IOKit and the
 GPU are not involved.
 """
 import argparse
@@ -210,6 +210,16 @@ void testDeclines() {
     check(select(colorDepth) == RAMClass::None, "depth path follows its switch");
 }
 
+void testMetalBudget() {
+    constexpr UInt64 MiB = 1ULL << 20, GiB = 1ULL << 30;
+    check(metalBudgetBytes(512 * MiB, 22 * GiB) == 512 * MiB + 11 * GiB, "half of the wired limit joins the pool");
+    check(metalBudgetBytes(512 * MiB, 3 * GiB) == 2 * GiB, "budget scales with the wired limit");
+    check(metalBudgetBytes(512 * MiB, 1 * GiB) == 1 * GiB, "budget never exceeds the wired limit");
+    check(metalBudgetBytes(2 * GiB, 1 * GiB) == 2 * GiB, "a larger pool is kept");
+    check(metalBudgetBytes(512 * MiB, 0) == 512 * MiB && metalBudgetBytes(0, 0) == 0, "no wired limit keeps the pool");
+    check(metalBudgetBytes(~0ULL - 1, ~0ULL) == ~0ULL, "no overflow near the top of the range");
+}
+
 void testComposition() {
     constexpr UInt32 all = kRAMBuffers | kRAMResourcePolicies;
     enable(all);
@@ -291,6 +301,7 @@ void testCounters() {
 int main() {
     testStandardResources();
     testDeclines();
+    testMetalBudget();
     testComposition();
     testRuntimeSwitch();
     testCounters();
@@ -321,6 +332,7 @@ def main():
         re.search(r"^\s*RAMCounter ramCounters\[[^;]*;", source, re.M).group(0),
         block(source, "void countRAMAllocation("),
         block(source, "int handleRAMEnabled("),
+        block(source, "UInt64 metalBudgetBytes("),
         re.search(r"^\s*ATIFormat textureFormat\([^\n]*", source, re.M).group(0),
         re.search(r"^\s*UInt32 textureCopyKind\([^\n]*", source, re.M).group(0),
         block(source, "enum class RAMTextureKind"),

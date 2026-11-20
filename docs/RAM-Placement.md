@@ -32,11 +32,12 @@ the color, high-color, and plane options, and a `-NRedRAMIOSurfaces` option that
 route. The route never changed the copy path, as [described below](#page-in), so both were
 removed. The `-NRedRAMIOSurfaces` argument is now ignored.
 
-The following Renoir experiment has an independent switch.
+The following Renoir experiments have independent switches.
 
 | Boot option | Behavior | Check on hardware |
 | --- | --- | --- |
 | `-NRedScanoutLayout` | Requests a display compatible layout for new 4K or larger 32-bit single plane scanout surfaces. AddrLib must accept the layout and the display driver still decides whether to use DCC. | Recreate display buffers and verify the layout, metadata and visible output. |
+| `-NRedRAMBudget` | Reports the fixed pool plus half of the wired system memory limit as the video memory of Metal devices, while `-NRedRAMTextures` is enabled. See [Metal working set](#metal-working-set). | Start a new Metal process and compare `recommendedMaxWorkingSetSize` before and after. |
 
 The video-plane option operates on texture formats rather than a Core Video pixel-buffer
 identifier or codec. NV12 and P010 plane views are relevant workloads. Direct allocation of
@@ -63,14 +64,17 @@ Once a placement hook is installed, `sysctl debug.nred.ram` shows the runtime st
 | `0x08` | `videoplane` | `-NRedRAMVideoPlanes` |
 | `0x10` | `depthstencil` | `-NRedRAMDepthStencil` |
 | `0x20` | `composition`, and `compositionplane` together with `0x08` | `-NRedRAMComposition` |
+| `0x40` | none | `-NRedRAMBudget` |
 
 Any of the texture options installs the shared allocation hook, which makes bits `0x02` to
-`0x10` available. Bit `0x20` also needs the display flip guard and bit `0x01` the data buffer
-hook, so those two are available only when their boot arguments are present.
+`0x10` available. Bit `0x20` also needs the display flip guard, bit `0x01` the data buffer
+hook and bit `0x40` the configuration hook, so those three are available only when their boot
+arguments are present.
 
 A change applies to later allocations. Existing resources keep their placement, and the flip
-guard keeps checking RAM-backed caches after bit `0x20` is cleared. To compare placements,
-recreate the measured resources after each change, for example by relaunching the workload.
+guard keeps checking RAM-backed caches after bit `0x20` is cleared. Bit `0x40` applies to
+Metal devices created afterwards. To compare placements, recreate the measured resources
+after each change, for example by relaunching the workload.
 
 ## How the hooks work
 
@@ -87,6 +91,7 @@ See [NRed.cpp](../NootedRed/NRed.cpp), [Kexts.cpp](../NootedRed/Kexts.cpp), and
 | --- | --- |
 | `IOAccelResource2::allocDataBufferMemory()` | Calls the driver with `preferVRAM=false` for a new type `0x0A` data buffer that prefers VRAM. If the call fails, retries with the original preference. |
 | `IOAccelResource2::allocMemory()` | Prefers system RAM for eligible type `0x40` resources with an empty primary slot. Private textures and Metal buffers arrive with copy kind `4`, an unset format and a system RAM backing. The driver keeps that backing and records the new primary allocation itself. Resources whose formats are already available use the format checks. A failed RAM attempt resumes the native VRAM path. |
+| `IOAccelDevice2::get_config()` | Runs the driver, then raises the video memory size in the returned configuration for devices that Metal created on a Renoir accelerator. See [Metal working set](#metal-working-set). |
 
 The composition route requires the reference driver images and a verified display flip guard.
 It preserves the IOSurface backing and lets the driver allocate and map a separate RAM cache.
@@ -126,6 +131,7 @@ of the macOS version string.
 | Primary allocation | Requires both reference UUIDs for selection. Verifies `allocMemory()+0x27`, the native RAM branch and allocator call, and the result and storage instructions. When accelerator bit 21 already selects RAM, resumes the original RAM branch at `+0xDA`. A successful new RAM allocation resumes at `+0x18B` with the memory object in `rax`. Declined or failed attempts resume at `+0x37`. |
 | Display flip guard | Requires the reference X5000 UUID. Checks the entry of `AMDHWDisplay::getDisplayPipeTransactionFlip()` and its native eligibility test at `+0x78` before wrapping the function. |
 | Scanout layout | Requires the reference X5000 UUID. Checks the AddrLib input at `initIOSurfacePlane()+0x1D3` and the surface information call at `+0x1E1`, then resumes after that call. |
+| Metal working set | Requires the reference IOAcceleratorFamily2 UUID. Checks that `IOAccelDevice2::get_config()` stores the VRAM size at `+0x83` and the wired system memory limit at `+0xAB` before wrapping the function. |
 
 The resource type, owning accelerator, backing memory, and primary memory fields are at `0x14`,
 `0x18`, `0x80`, and `0x88`. The texture flags at `0x1B4` carry the format in their low byte and
@@ -151,7 +157,9 @@ system-memory wire limit and GPU address-space availability also constrain the w
 that can stay in RAM. The firmware reservation and overall UMA budget remain under the
 original driver policy.
 
-The placement policy does not change the memory size reported to applications. Metal takes
+### Metal working set
+
+Placement does not change the memory size reported to applications. Metal takes
 `recommendedMaxWorkingSetSize` and `dedicatedMemorySize` from the VRAM size at accelerator
 offset `0xCA8`, which `IOAccelDevice2::get_config()` returns at offset `0x10` of its output.
 Both report 512 MiB on the reference machine, so applications that size their working set
@@ -161,10 +169,21 @@ A command buffer that references more is split into further segments.
 
 Reporting unified memory in the first `get_config()` word would not raise either value. Metal
 then limits the shared size to the VRAM size and clears `_videoRam`, which would leave the
-segment limit at zero. Raising the reported size would require changing the VRAM size in the
-`get_config()` output.
-One segment could then reference more than the fixed pool holds while some of its resources
-remain in VRAM, so that change needs its own design and testing.
+segment limit at zero. `-NRedRAMBudget` therefore changes only the VRAM size in the returned
+configuration. It adds half of the wired system memory limit at offset `0x20`, which is a third
+of physical memory rounded up to 1 GiB, and stays within that limit. The reference machine
+reports 11.5 GiB instead of 512 MiB.
+
+The hook applies only to devices whose `API` property is `Metal`, on a Renoir accelerator, and
+only while the texture class is enabled. Metal sets that property when it creates the device.
+Clients that do not set it keep the original values, and so does kernel code that reads the
+accelerator's own field. Metal reads the configuration when it creates a device, so processes
+started earlier keep the old value.
+
+The limit rests on the placement policy. Metal resources reach system RAM, where the fixed pool
+does not bound them, but a resource that stays in VRAM can still be referenced together with
+more than the pool holds in one segment. Textures in the next section stay native, so keep the
+option off for workloads that depend on them until the counters show how much they take.
 
 ### Textures that stay native
 

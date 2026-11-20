@@ -25,6 +25,9 @@ arguments. Reboot from that EFI. The full test set uses these flags.
 -NRedRAMBuffers -NRedRAMTextures -NRedRAMHighColor -NRedRAMVideoPlanes -NRedRAMDepthStencil -NRedRAMComposition
 ```
 
+Add `-NRedRAMBudget` to also check the
+[Metal working set](#check-the-metal-working-set-and-opengl-textures).
+
 Start with a boot with the switches off for a baseline. Compare each option by itself or use
 the full set for an integration check. Confirm the effective args and loaded driver identities.
 
@@ -119,7 +122,24 @@ managed buffers and textures, private textures in formats outside the format cla
 private placement heap, and IOSurface-backed textures. The VRAM side of the comparison
 therefore needs a build with the switch.
 
-## Check OpenGL textures
+## Check the Metal working set and OpenGL textures
+
+With `-NRedRAMBudget` and `-NRedRAMTextures`, a Metal process started afterwards reports a
+larger working set. The first two lines of the benchmark output name the device and give its
+`recommendedMaxWorkingSetSize`. On the 64 GiB reference machine, expect about 11.5 GiB with
+bit `0x40` set and 512 MiB with it cleared.
+Processes that started earlier keep the value they read when they created their device.
+
+```sh
+sudo sysctl debug.nred.ram.enabled=0x3f    # without 0x40
+build/tools/ram_placement_bench --rounds 3 | head -2
+sudo sysctl debug.nred.ram.enabled=0x7f    # with 0x40
+build/tools/ram_placement_bench --rounds 3 | head -2
+```
+
+Run the bandwidth and allocation comparison again with the larger value, because Metal sizes
+its command buffer segments from it. Watch `sysctl debug.nred.ram` and the system log for a
+GPU recovery during the heavy workloads of the next section.
 
 `tools/gl_texture_probe.py` creates OpenGL textures and prints how the accelerator's VRAM and
 system memory use changed, together with the counters that moved. Run it with all classes

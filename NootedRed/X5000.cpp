@@ -162,6 +162,19 @@ namespace
     constexpr UInt8 kDisplayFlipCheck[] = {
         0x41, 0xF6, 0x87, 0xB8, 0x01, 0x00, 0x00, 0x20, 0x0F, 0x84, 0x04, 0x04, 0x00, 0x00,
     };
+    constexpr char kGetConfig[] = "__ZN14IOAccelDevice210get_configEP23IOAccelDeviceConfigData";
+    // get_config() copies the VRAM size (accelerator +0xCA8) to config +0x10 and the wired system memory limit
+    // to +0x20. The device keeps its accelerator at +0x108.
+    constexpr size_t kConfigVideoOffset       = 0x10;
+    constexpr size_t kConfigWiredOffset       = 0x20;
+    constexpr size_t kDeviceAcceleratorOffset = 0x108;
+    constexpr size_t kConfigVideoStoreOffset  = 0x83;
+    constexpr UInt8  kConfigVideoStore[]      = {0x48, 0x8B, 0x87, 0xA8, 0x0C, 0x00, 0x00, 0x48, 0x89, 0x43, 0x10};
+    constexpr size_t kConfigWiredStoreOffset  = 0xAB;
+    constexpr UInt8  kConfigWiredStore[]      = {
+        0x48, 0x8B, 0x07, 0xFF, 0x90, 0x90, 0x09, 0x00, 0x00, 0x48, 0x89, 0x43, 0x20,
+    };
+
     constexpr size_t kBackingMemoryOffset  = 0x80;
     constexpr size_t kResourceFlagsOffset  = 0x0C;
     constexpr size_t kResourceSizeOffset   = 0xC8;
@@ -194,7 +207,8 @@ namespace
     constexpr UInt32 kRAMVideoPlanes  = 1U << 3;
     constexpr UInt32 kRAMDepthStencil = 1U << 4;
     constexpr UInt32 kRAMComposition  = 1U << 5;
-    // Classes selected in IOAccelResource2::allocMemory().
+    constexpr UInt32 kRAMMetalBudget  = 1U << 6;
+    // Classes selected in IOAccelResource2::allocMemory(). The other bits have their own hooks.
     constexpr UInt32 kRAMResourcePolicies =
         kRAMTextures | kRAMHighColor | kRAMVideoPlanes | kRAMDepthStencil | kRAMComposition;
 
@@ -204,6 +218,7 @@ namespace
     bool ramResourceRouteReady{false};
     bool scanoutLayoutRequested{false};
     mach_vm_address_t orgGetDisplayFlip{0};
+    mach_vm_address_t orgGetConfig{0};
     const OSMetaClass* acceleratorClass{nullptr};
     const OSMetaClass* sysMemoryClass{nullptr};
     const OSMetaClass* deviceCacheClass{nullptr};
@@ -324,14 +339,18 @@ namespace
     }
 #undef NRED_RAM_CLASSES
 
-    bool isRenoirResource(void* const resource)
+    bool isRenoirAccelerator(const IOService* const accelerator)
     {
         const auto& nred = NRed::singleton();
-        if (resource == nullptr || nred.getIGPU() == nullptr || !nred.getAttributes().isRenoir()) { return false; }
-        const auto* const accelerator = getMember<IOService*>(resource, kAcceleratorOffset);
+        if (accelerator == nullptr || nred.getIGPU() == nullptr || !nred.getAttributes().isRenoir()) { return false; }
         const auto* const expected = __atomic_load_n(&acceleratorClass, __ATOMIC_ACQUIRE);
-        return accelerator != nullptr && expected != nullptr && accelerator->getProvider() == nred.getIGPU()
+        return expected != nullptr && accelerator->getProvider() == nred.getIGPU()
                && accelerator->metaCast(expected) != nullptr;
+    }
+
+    bool isRenoirResource(void* const resource)
+    {
+        return resource != nullptr && isRenoirAccelerator(getMember<IOService*>(resource, kAcceleratorOffset));
     }
 
     bool isRAMMemory(const OSObject* const memory)
@@ -353,6 +372,22 @@ namespace
             __atomic_store_n(&deviceCacheClass, expected, __ATOMIC_RELEASE);
         }
         return cache != nullptr && cache->metaCast(expected) != nullptr;
+    }
+
+    bool isMetalDevice(OSObject* const device)
+    {
+        const auto* const entry = OSDynamicCast(IORegistryEntry, device);
+        const auto* const api   = entry != nullptr ? OSDynamicCast(OSString, entry->getProperty("API")) : nullptr;
+        return api != nullptr && api->isEqualTo("Metal");
+    }
+
+    // Metal derives its working set size and the byte limit of a command buffer segment from the video memory
+    // size. Resources in system RAM do not count against that pool, so add half of the wired system memory limit
+    // to it and stay within that limit.
+    UInt64 metalBudgetBytes(const UInt64 video, const UInt64 wired)
+    {
+        if (video >= wired) { return video; }
+        return wired / 2 < wired - video ? video + wired / 2 : wired;
     }
 
     ATIFormat textureFormat(const UInt32 flags) { return static_cast<ATIFormat>(flags & 0xFF); }
@@ -817,6 +852,7 @@ void X5000::init()
         {"-NRedRAMVideoPlanes", kRAMVideoPlanes},
         {"-NRedRAMDepthStencil", kRAMDepthStencil},
         {"-NRedRAMComposition", kRAMComposition},
+        {"-NRedRAMBudget", kRAMMetalBudget},
     };
     for (const auto& option : options) {
         if (checkKernelArgument(option.argument)) { ramRequested |= option.policy; }
@@ -856,6 +892,38 @@ namespace
             return false;
         }
         KernelPatcher::RouteRequest route{kGetDisplayFlip, wrapGetDisplayFlip, orgGetDisplayFlip};
+        const auto installed = patcher.routeMultipleLong(id, &route, 1, slide, size);
+        patcher.clearError();
+        return installed;
+    }
+
+    IOReturn wrapGetConfig(void* const device, void* const config)
+    {
+        const auto result = FunctionCast(wrapGetConfig, orgGetConfig)(device, config);
+        if (result != kIOReturnSuccess || !ramPolicyEnabled(kRAMMetalBudget | kRAMTextures)
+            || !isRenoirAccelerator(getMember<IOService*>(device, kDeviceAcceleratorOffset))
+            || !isMetalDevice(static_cast<OSObject*>(device)))
+        {
+            return result;
+        }
+        auto& video = getMember<UInt64>(config, kConfigVideoOffset);
+        video       = metalBudgetBytes(video, getMember<UInt64>(config, kConfigWiredOffset));
+        return result;
+    }
+
+    [[gnu::noinline]] bool installMetalBudget(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+                                             const size_t size)
+    {
+        const auto function = patcher.solveSymbol(id, kGetConfig, slide, size);
+        patcher.clearError();
+        if (!matchesImage(slide, size, kAcceleratorUUID)
+            || !matchesCode(function, slide, size, kConfigVideoStoreOffset, kConfigVideoStore)
+            || !matchesCode(function, slide, size, kConfigWiredStoreOffset, kConfigWiredStore))
+        {
+            SYSLOG("RAMResources", "Unsupported IOAccelDevice2 configuration path");
+            return false;
+        }
+        KernelPatcher::RouteRequest route{kGetConfig, wrapGetConfig, orgGetConfig};
         const auto installed = patcher.routeMultipleLong(id, &route, 1, slide, size);
         patcher.clearError();
         return installed;
@@ -1000,6 +1068,9 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         __atomic_store_n(&sysMemoryClass, reinterpret_cast<const OSMetaClass*>(memoryClass), __ATOMIC_RELEASE);
         if ((ramRequested & kRAMBuffers) != 0 && this->installRAMBufferRoute(patcher, id, slide, size)) {
             makeRAMPolicyAvailable(kRAMBuffers);
+        }
+        if ((ramRequested & kRAMMetalBudget) != 0 && installMetalBudget(patcher, id, slide, size)) {
+            makeRAMPolicyAvailable(kRAMMetalBudget);
         }
         ramResourceRouteReady = wantsRAMTextureAllocation() && installRAMTextureRoute(patcher, id, slide, size);
         return;
