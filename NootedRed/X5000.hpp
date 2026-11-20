@@ -57,7 +57,6 @@ class X5000
     mach_vm_address_t              orgObtainAccelChannelGroup{0};
     mach_vm_address_t              orgHwlConvertChipFamily{0};
     mach_vm_address_t              orgPM4SubmitCommandBuffer{0};
-    mach_vm_address_t              orgAllocateLargeBlocks{0};
     mach_vm_address_t              orgRTHardwareDidStart{0};
     mach_vm_address_t              orgAllocDataBufferMemory{0};
     UInt32                         gfxOffSupportedOffset{0x206b8};

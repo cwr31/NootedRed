@@ -71,6 +71,9 @@ range 分配器换成 CPU 记录器，虚表查询也只返回一个受控布尔
   allocation type、chunk size 和 minimum block size。
 - hook 安装成功时公布 `NRedVRAMAllocatorRevision=2`。该标记只证明 hook 版本，
   不证明某次分配已经走过回退。
+- 回退会比原生分配器更频繁地走非连续分配，因此只有 `allocPages` 的 hole 检查确认安全
+  （已打补丁，或驱动本来就按有符号数比较）才安装该 hook；识别不了时保留原生分配器并写日志。
+  结果公布为 `NRedAllocPagesSafe`（1 为安全，0 为未识别）。
 
 注意：源文件另一个 `patchIOAccelAllocPages` 仍需解析 range 重载，以定位其内部
 `allocPages` 调用。因此修复后的二进制同时包含两个重载名称是正常的。

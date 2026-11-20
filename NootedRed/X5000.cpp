@@ -429,8 +429,9 @@ namespace
     // Fixes an unsigned 32-bit underflow in IOAccelMemoryAllocator2::allocPages
     // when non-contiguous allocation (`isContiguousOnly == false`) encounters a
     // small free hole whose aligned start `(holeStart + align - 1) & ~(align - 1)`
-    // exceeds `holeEnd`.
-    void patchIOAccelAllocPages(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+    // exceeds `holeEnd`. Returns whether the hole check is now safe, either because
+    // it was patched or because the driver already compares the values as signed.
+    bool patchIOAccelAllocPages(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
                                 const size_t size)
     {
         const auto allocNonContig =
@@ -440,7 +441,7 @@ namespace
                                 slide, size);
         if (allocNonContig == 0) {
             patcher.clearError();
-            return;
+            return false;
         }
 
         const auto* const fnBytes    = reinterpret_cast<const UInt8*>(allocNonContig);
@@ -457,11 +458,11 @@ namespace
                 break;
             }
         }
-        if (allocPages == 0) { return; }
+        if (allocPages == 0) { return false; }
 
         auto* const targetBytes = reinterpret_cast<UInt8*>(allocPages);
         if (targetBytes[0] != 0x55 || targetBytes[1] != 0x48 || targetBytes[2] != 0x89 || targetBytes[3] != 0xE5) {
-            return;
+            return false;
         }
 
         for (size_t off = 0x40; off < 0x160; ++off) {
@@ -475,15 +476,15 @@ namespace
                 targetBytes[off + 7] == 0x0F && (targetBytes[off + 8] == 0x84 || targetBytes[off + 8] == 0x8E) &&
                 targetBytes[off + 13] == 0x4D && targetBytes[off + 14] == 0x8D && targetBytes[off + 15] == 0x34 &&
                 targetBytes[off + 16] == 0x09) {
-                if (targetBytes[off + 8] == 0x84 &&
-                    MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) == KERN_SUCCESS) {
-                    targetBytes[off + 8] = 0x8E;
-                    MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
-                    SYSLOG("X5000", "Patched IOAccelMemoryAllocator2::allocPages non-contiguous hole underflow");
-                }
-                return;
+                if (targetBytes[off + 8] == 0x8E) { return true; }
+                if (MachInfo::setKernelWriting(true, KernelPatcher::kernelWriteLock) != KERN_SUCCESS) { return false; }
+                targetBytes[off + 8] = 0x8E;
+                MachInfo::setKernelWriting(false, KernelPatcher::kernelWriteLock);
+                SYSLOG("X5000", "Patched IOAccelMemoryAllocator2::allocPages non-contiguous hole underflow");
+                return true;
             }
         }
+        return false;
     }
 
     // Fixes AMDSWScheduler::advance dereferencing a null peer channel pointer
@@ -1079,10 +1080,17 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         slide, size));
     this->allocatorTraceEnabled = checkKernelArgument("-NRedAllocTrace");
 
-    if (this->orgTotalFreeMemory != nullptr && this->orgAllocate != nullptr && this->orgAllocateNonContiguous != nullptr) {
+    // The allocator below takes the non-contiguous path far more often than the native one,
+    // so it needs the allocPages hole check to be safe.
+    const auto allocPagesSafe = patchIOAccelAllocPages(patcher, id, slide, size);
+    NRed::singleton().setProp32("NRedAllocPagesSafe", allocPagesSafe ? 1 : 0);
+    if (!allocPagesSafe) { SYSLOG("X5000", "allocPages hole check not recognised, keeping the native VRAM allocator"); }
+    else if (this->orgTotalFreeMemory != nullptr && this->orgAllocate != nullptr
+             && this->orgAllocateNonContiguous != nullptr)
+    {
         PenguinWizardry::PatternRouteRequest allocLargeReq{
             "__ZN26AMDRadeonX5000_AMDHWMemory19allocateLargeBlocksEP16AMDMemoryElementyyy15_eOP_ORIGINATOR9_eOP_TYPEb",
-            wrapAllocateLargeBlocks, this->orgAllocateLargeBlocks};
+            wrapAllocateLargeBlocks};
         if (!allocLargeReq.route(patcher, id, slide, size)) {
             patcher.clearError();
             SYSLOG("X5000", "Failed to route AMDHWMemory::allocateLargeBlocks");
@@ -1090,7 +1098,6 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
             NRed::singleton().setProp32("NRedVRAMAllocatorRevision", 2);
         }
     }
-    patchIOAccelAllocPages(patcher, id, slide, size);
     VideoCommandPatch::install(
         patcher, id, slide, size,
         "__ZN35AMDRadeonX5000_AMDAccelVideoContext14processCommandEPj16VideoCommandTypeS0_j",
