@@ -433,7 +433,7 @@ public:
                                       ADDR2_COMPUTE_SURFACE_INFO_OUTPUT*)>(vtable, 0x130)(this, input, output);
     }
 
-    UInt32 getPreferredSwizzleMode2(ADDR2_COMPUTE_SURFACE_INFO_INPUT* infoInput);
+    UInt32 getPreferredSwizzleMode2(const ADDR2_COMPUTE_SURFACE_INFO_INPUT* infoInput, bool tiledDisplay = false);
 
     static void resolve(KernelPatcher& patcher, size_t id, mach_vm_address_t start, size_t size);
 };

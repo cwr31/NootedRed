@@ -36,12 +36,13 @@ static const UInt8 kAddr2GetPreferredSurfaceSettingPatternNew[] = {0x55, 0x48, 0
 AMDRadeonX5000_AMDHWAlignManager::Constants AMDRadeonX5000_AMDHWAlignManager::constants;
 
 // Decompiled from AMDRadeonX6000 combined with info from mesa's AddrLib
-UInt32 AMDRadeonX5000_AMDHWAlignManager::getPreferredSwizzleMode2(ADDR2_COMPUTE_SURFACE_INFO_INPUT* infoInput)
+UInt32 AMDRadeonX5000_AMDHWAlignManager::getPreferredSwizzleMode2(
+    const ADDR2_COMPUTE_SURFACE_INFO_INPUT* infoInput, const bool tiledDisplay)
 {
     const auto                              addrlib = getMember<void*>(this, 0x18);
     ADDR2_GET_PREFERRED_SURF_SETTING_OUTPUT output;
     if (constants.addr2GetPreferredSurfaceSettingNew != nullptr) {
-        ADDR2_GET_PREFERRED_SURF_SETTING_INPUT_NEW input;
+        ADDR2_GET_PREFERRED_SURF_SETTING_INPUT_NEW input{};
         input.width              = infoInput->width;
         input.height             = infoInput->height;
         input.bpp                = infoInput->bpp;
@@ -51,6 +52,13 @@ UInt32 AMDRadeonX5000_AMDHWAlignManager::getPreferredSwizzleMode2(ADDR2_COMPUTE_
         input.numSlices          = infoInput->numSlices;
         input.flags.display      = infoInput->flags.display;
         input.forbiddenBlock.var = 1;    // No variable swizzle modes
+        if (tiledDisplay) {
+            input.size = sizeof(input);
+            input.flags = infoInput->flags;
+            input.numMipLevels = infoInput->numMipLevels;
+            input.numFrags = infoInput->numFrags;
+            input.forbiddenBlock.linear = 1;
+        }
         if (constants.addr2GetPreferredSurfaceSettingNew(addrlib, &input, &output) == 0) { return output.swizzleMode; }
     }
     else {
@@ -64,6 +72,12 @@ UInt32 AMDRadeonX5000_AMDHWAlignManager::getPreferredSwizzleMode2(ADDR2_COMPUTE_
         input.numSlices          = infoInput->numSlices;
         input.flags.display      = infoInput->flags.display;
         input.forbiddenBlock.var = 1;    // No variable swizzle modes
+        if (tiledDisplay) {
+            input.flags = infoInput->flags;
+            input.numMipLevels = infoInput->numMipLevels;
+            input.numFrags = infoInput->numFrags;
+            input.forbiddenBlock.linear = 1;
+        }
         if (constants.addr2GetPreferredSurfaceSetting(addrlib, &input, &output) == 0) { return output.swizzleMode; }
     }
     return 0U;

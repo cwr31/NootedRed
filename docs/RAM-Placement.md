@@ -29,6 +29,12 @@ setup and a test matrix. Color and plane format names below refer to the X5000
 | `-NRedRAMIOSurfaces` | Original driver path for IOSurface creation. | Skips temporary VRAM for qualifying `BGRA8` and `RGBA8` IOSurfaces when both prepared maps use system RAM. |
 | `-NRedRAMComposition` | Prefers RAM for new `BGRA8` and `RGBA8` device caches without direct display eligibility. With `-NRedRAMVideoPlanes`, it also covers non-display `Rg8` IOSurface planes on the linear copy path with no device cache, auxiliary storage, or DCC metadata. | Uses the prepared system RAM maps when possible. |
 
+The following Renoir experiment has an independent switch.
+
+| Boot option | Behavior | Check on hardware |
+| --- | --- | --- |
+| `-NRedScanoutLayout` | Requests a display compatible layout for new 4K or larger 32-bit single plane scanout surfaces. AddrLib must accept the layout and the display driver still decides whether to use DCC. | Recreate display buffers and verify the layout, metadata and visible output. |
+
 The video-plane option operates on texture formats rather than a Core Video pixel-buffer
 identifier or codec. NV12 and P010 plane views are relevant workloads. Direct allocation of
 hardware decoder and encoder surfaces is handled separately by the VCN driver.

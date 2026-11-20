@@ -95,6 +95,14 @@ namespace
     constexpr char kGetDisplayFlip[] =
         "__ZN27AMDRadeonX5000_AMDHWDisplay29getDisplayPipeTransactionFlipEjP16IOAccelResource2S1_17_eAMDSwapInterval"
         "P14_AMD_PIPE_FLIPb42AMDAccelDisplayPipeTransactionPipeRotationS4_";
+    constexpr char kInitScanoutPlane[] =
+        "__ZN36AMDRadeonX5000_AMDAccelResourceAddr218initIOSurfacePlaneEjjjjb";
+    constexpr size_t kScanoutLayoutCallOffset = 0x1E1;
+    constexpr UInt8 kScanoutLayoutCall[] = {
+        0x49, 0x8B, 0xBD, 0x50, 0x02, 0, 0, 0x48, 0x8B, 0x07, 0x4C, 0x89, 0xF6, 0x48, 0x89, 0xDA,
+        0xFF, 0x90, 0x30, 0x01, 0, 0,
+    };
+    constexpr UInt8 kScanoutLayoutInput[] = {0x48, 0xB8, 0x0A, 0, 0, 0, 0x01, 0, 0, 0};
     constexpr size_t kResourceTypeOffset = 0x14;
     constexpr size_t kAcceleratorOffset  = 0x18;
     constexpr size_t kMainMemoryOffset   = 0x88;
@@ -196,6 +204,7 @@ namespace
     bool ramCompositionRequested{false};
     bool ramCompositionReady{false};
     bool ramX5000Verified{false};
+    bool scanoutLayoutRequested{false};
     mach_vm_address_t orgGetDisplayFlip{0};
 
     bool isRenoirResource(void* const resource)
@@ -488,6 +497,50 @@ extern "C" {
 [[gnu::used]] static mach_vm_address_t nredRAMAllocResult{0};
 [[gnu::used]] static mach_vm_address_t nredRAMPageContinue{0};
 [[gnu::used]] static mach_vm_address_t nredRAMPageReuse{0};
+[[gnu::used]] static mach_vm_address_t nredScanoutLayoutReturn{0};
+
+[[gnu::used, gnu::noinline]] static IOReturn nredSelectScanoutLayout(
+    AMDRadeonX5000_AMDHWAlignManager* const align, ADDR2_COMPUTE_SURFACE_INFO_INPUT* const input,
+    ADDR2_COMPUTE_SURFACE_INFO_OUTPUT* const output, void* const resource)
+{
+    const auto surfaceFlags = getMember<UInt8>(resource, kSurfaceFlagsOffset);
+    if (input->size == sizeof(*input) && output->size == sizeof(*output)
+        && input->swizzleMode == 0xA && input->flags.value == 0x220 && input->bpp == 32
+        && input->resourceType == ADDR_RSRC_TEX_2D && input->numSlices == 1 && input->numSamples == 1
+        && input->width >= 3840 && input->height >= 2160
+        && getMember<UInt8>(resource, kResourceTypeOffset) == kVidMemSharedType
+        && getMember<UInt8>(resource, 0xAD) == 1 && (surfaceFlags & 0x20) != 0
+        && getMember<void*>(resource, kMainMemoryOffset) == nullptr)
+    {
+        auto candidate = *input;
+        const auto swizzle = align->getPreferredSwizzleMode2(&candidate, true);
+        if (swizzle != 0 && swizzle < 32 && (Dcn2NonBpp64SwModeMask & (1U << swizzle)) != 0) {
+            candidate.swizzleMode = swizzle;
+            auto result = *output;
+            if (align->getSurfaceInfo2(&candidate, &result) == kIOReturnSuccess) {
+                *input = candidate;
+                *output = result;
+                static volatile UInt32 logged{0};
+                if (OSCompareAndSwap(0, 1, &logged)) {
+                    SYSLOG("Scanout", "Selected Renoir display layout 0x%x", swizzle);
+                }
+                return kIOReturnSuccess;
+            }
+        }
+    }
+    return align->getSurfaceInfo2(input, output);
+}
+
+[[gnu::naked]] static void nredScanoutLayoutBranch()
+{
+    asm volatile(
+        "movq 0x250(%r13), %rdi\n"
+        "movq %r14, %rsi\n"
+        "movq %rbx, %rdx\n"
+        "movq %r13, %rcx\n"
+        "callq _nredSelectScanoutLayout\n"
+        "jmpq *_nredScanoutLayoutReturn(%rip)\n");
+}
 
 static bool nredRAMSelectComposition(void* const resource, void* const shared)
 {
@@ -682,6 +735,7 @@ void X5000::init()
     ramHighColorRequested     = checkKernelArgument("-NRedRAMHighColor");
     ramVideoPlanesRequested   = checkKernelArgument("-NRedRAMVideoPlanes");
     ramCompositionRequested   = checkKernelArgument("-NRedRAMComposition");
+    scanoutLayoutRequested    = checkKernelArgument("-NRedScanoutLayout");
     if (this->ramBuffersRequested || wantsRAMTextureAllocation()) {
         lilu.onKextLoadForce(&kextIOAcceleratorFamily2);
     }
@@ -730,6 +784,24 @@ namespace
         const auto installed = patcher.routeMultipleLong(id, &request, 1);
         patcher.clearError();
         return installed;
+    }
+
+    [[gnu::noinline]] void installScanoutLayout(KernelPatcher& patcher, const size_t id,
+                                               const mach_vm_address_t slide, const size_t size)
+    {
+        const auto function = patcher.solveSymbol(id, kInitScanoutPlane, slide, size);
+        patcher.clearError();
+        if (!matchesImage(slide, size, kX5000UUID)
+            || !matchesCode(function, slide, size, 0x1D3, kScanoutLayoutInput)
+            || !matchesCode(function, slide, size, kScanoutLayoutCallOffset, kScanoutLayoutCall))
+        {
+            SYSLOG("Scanout", "Unsupported X5000 scanout layout call");
+            return;
+        }
+        const auto call = function + kScanoutLayoutCallOffset;
+        nredScanoutLayoutReturn = call + sizeof(kScanoutLayoutCall);
+        const auto installed = routeRAMBranch(patcher, id, call, nredScanoutLayoutBranch);
+        SYSLOG("Scanout", "Renoir display layout route %s", installed ? "installed" : "failed");
     }
 
     void installRAMTextureRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
@@ -898,6 +970,9 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
                "Failed to resolve symbols");
 
     AMDRadeonX5000_AMDHWAlignManager::resolve(patcher, id, slide, size);
+    if (scanoutLayoutRequested && NRed::singleton().getAttributes().isRenoir()) {
+        installScanoutLayout(patcher, id, slide, size);
+    }
     AMDRadeonX5000_AMDHWDisplay::resolve(patcher, id, slide, size);
     AMDRadeonX5000_AMDGFX9DCNDisplay::registerMC(kextRadeonX5000.id, patcher, id, slide, size);
     AMDRadeonX5000_AMDGFX9DCN1Display::resolve(kextRadeonX5000.id);
