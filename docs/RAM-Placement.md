@@ -92,6 +92,13 @@ It preserves the IOSurface backing and lets the driver allocate and map a separa
 The display guard declines direct output if either input is a `0xC0` cache with RAM as its
 primary memory. X5000 handles normal output through its existing display buffers.
 
+`AMDHWDisplay` and `AMDGFX9Display` share one `getDisplayPipeTransactionFlip()` implementation
+at vtable slot `0x198`, and the display classes that NootedRed registers inherit that slot.
+`AMDAccelDisplayPipe::executeTransaction()` and
+`AMDAccelDisplayMachine::set_display_mode_and_vram()` call it. The guard patches the function
+entry, so every caller goes through it. No hardware test has yet made a RAM cache eligible for
+direct output after its allocation.
+
 ### Page-in
 
 Page-in is unchanged. `AMDRadeonX5000_AMDAccelResource::pageon()` copies a texture through a
@@ -142,6 +149,21 @@ eligible for display scanout use the original allocator. The
 system-memory wire limit and GPU address-space availability also constrain the workloads
 that can stay in RAM. The firmware reservation and overall UMA budget remain under the
 original driver policy.
+
+The placement policy does not change the memory size reported to applications. Metal takes
+`recommendedMaxWorkingSetSize` and `dedicatedMemorySize` from the VRAM size at accelerator
+offset `0xCA8`, which `IOAccelDevice2::get_config()` returns at offset `0x10` of its output.
+Both report 512 MiB on the reference machine, so applications that size their working set
+from Metal still plan for 512 MiB. The AMD Metal driver also copies this size into
+`_segmentByteThreshold`, the byte limit for the resources of one command buffer segment.
+A command buffer that references more is split into further segments.
+
+Reporting unified memory in the first `get_config()` word would not raise either value. Metal
+then limits the shared size to the VRAM size and clears `_videoRam`, which would leave the
+segment limit at zero. Raising the reported size would require changing the VRAM size in the
+`get_config()` output.
+One segment could then reference more than the fixed pool holds while some of its resources
+remain in VRAM, so that change needs its own design and testing.
 
 The counters report placement per class. Page-in and copy bytes are not counted yet. Measure
 them before widening the format or hardware coverage. The functional smoke results and the separate

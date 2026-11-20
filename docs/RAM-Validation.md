@@ -48,6 +48,10 @@ log show --last boot --info --style compact \
   --predicate 'process == "kernel" AND (eventMessage CONTAINS "RAMBuffers" OR eventMessage CONTAINS "RAMResources")'
 ```
 
+Builds with the [runtime switch](RAM-Placement.md#runtime-switch-and-counters) also report
+the installed classes in `debug.nred.ram.available` and the placements of each class in its
+counters. Run `sysctl debug.nred.ram`, which does not depend on the kernel log.
+
 | Path | GPU workload and expected result |
 | --- | --- |
 | Buffers | Create a workload that reaches `allocDataBufferMemory()`. Use known GPU input data and compare the GPU-written values read back by the CPU. Correlate with the buffer hook because individual Metal buffers can take different allocation paths. |
@@ -107,7 +111,13 @@ reads reached 25–28 GB/s in three runs with a sampled 800 MHz memory clock and
 run at 1,333 MHz. Shader writes and blit copies stayed at 29–31 GB/s. Creating an 8 MiB
 buffer took 0.03–0.06 ms. Its first use took 2.4–2.8 ms of wall time, of which 0.25–0.29 ms
 was GPU time, and a second use took 0.40–0.49 ms. Preparing a new 8 MiB RAM buffer therefore
-cost about 2 ms at first use. The VRAM side of the comparison needs a build with the switch.
+cost about 2 ms at first use.
+
+Every other Metal allocation tried in that boot also went to system RAM. This covered
+managed buffers and textures, private textures in formats outside the format classes
+(`RGBA16Uint`, `RGBA32Float`, `R32Float` and `BC7`), 4× MSAA, 3D and depth textures, a
+private placement heap, and IOSurface-backed textures. The VRAM side of the comparison
+therefore needs a build with the switch.
 
 ## Measure placement and capacity
 
