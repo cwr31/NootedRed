@@ -42,6 +42,35 @@ The video-plane option operates on texture formats rather than a Core Video pixe
 identifier or codec. NV12 and P010 plane views are relevant workloads. Direct allocation of
 hardware decoder and encoder surfaces is handled separately by the VCN driver.
 
+## Runtime switch and counters
+
+Once a placement hook is installed, `sysctl debug.nred.ram` shows the runtime state. Writing
+`debug.nred.ram.enabled` as root changes the classes used for new allocations without a reboot.
+
+| Name | Meaning |
+| --- | --- |
+| `enabled` | Bit mask of the classes used for new allocations. It starts with the classes requested by boot arguments. |
+| `available` | Classes whose hooks are installed. `enabled` rejects other bits with `EINVAL`. |
+| `<class>_count`, `<class>_bytes` | Allocations placed in system RAM since boot, and their size rounded up to whole pages. |
+| `failures` | RAM attempts that fell back to the native path. |
+
+| Bit | Counter classes | Boot argument |
+| --- | --- | --- |
+| `0x01` | `buffer` | `-NRedRAMBuffers` |
+| `0x02` | `private`, `color` | `-NRedRAMTextures` |
+| `0x04` | `highcolor` | `-NRedRAMHighColor` |
+| `0x08` | `videoplane` | `-NRedRAMVideoPlanes` |
+| `0x10` | `depthstencil` | `-NRedRAMDepthStencil` |
+| `0x20` | `composition`, and `compositionplane` together with `0x08` | `-NRedRAMComposition` |
+
+Any of the texture options installs the shared allocation hook, which makes bits `0x02` to
+`0x10` available. Bit `0x20` also needs the display flip guard and bit `0x01` the data buffer
+hook, so those two are available only when their boot arguments are present.
+
+A change applies to later allocations. Existing resources keep their placement, and the flip
+guard keeps checking RAM-backed caches after bit `0x20` is cleared. To compare placements,
+recreate the measured resources after each change, for example by relaunching the workload.
+
 ## How the hooks work
 
 `NRed::init()` calls `X5000::init()` to read the options. Options affecting new allocations
@@ -114,6 +143,6 @@ system-memory wire limit and GPU address-space availability also constrain the w
 that can stay in RAM. The firmware reservation and overall UMA budget remain under the
 original driver policy.
 
-Future work should measure placement per resource and record page-in and copy bytes before
-widening the format or hardware coverage. The functional smoke results and the separate
+The counters report placement per class. Page-in and copy bytes are not counted yet. Measure
+them before widening the format or hardware coverage. The functional smoke results and the separate
 placement and capacity acceptance criteria are in the [test guide](RAM-Validation.md).

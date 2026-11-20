@@ -60,7 +60,6 @@ class X5000
     mach_vm_address_t              orgAllocateLargeBlocks{0};
     mach_vm_address_t              orgRTHardwareDidStart{0};
     mach_vm_address_t              orgAllocDataBufferMemory{0};
-    bool                           ramBuffersRequested{false};
     UInt32                         gfxOffSupportedOffset{0x206b8};
     void                           (*notifyGfxAccess)(void*){nullptr};
     UInt64                         (*orgTotalFreeMemory)(void*){nullptr};
@@ -83,7 +82,7 @@ public:
     void setVCN0Capability(void* self, bool enabled);
 
 private:
-    void installRAMBufferRoute(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size);
+    bool installRAMBufferRoute(KernelPatcher& patcher, size_t id, mach_vm_address_t slide, size_t size);
     static bool wrapAllocDataBufferMemory(void* resource, void* shared, bool preferVRAM, UInt32 options);
     static bool   allocateHWEngines(void* self);
     static void   wrapSetupAndInitializeHWCapabilities(void* self);

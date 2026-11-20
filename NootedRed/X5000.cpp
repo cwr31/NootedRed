@@ -52,6 +52,8 @@
 #include <mach/i386/vm_param.h>
 #include <mach/i386/vm_types.h>
 #include <mach/kern_return.h>
+#include <sys/errno.h>
+#include <sys/sysctl.h>
 
 static const UInt8 kChannelTypesPattern[] = {0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
                                              0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00};
@@ -185,18 +187,140 @@ namespace
     using CreateSysMemory = void* (*)(void*, void*, void*, void*, UInt32, UInt64, bool);
     CreateSysMemory createRAMPrimary{nullptr};
 
-    bool ramColorRequested{false};
-    bool ramDepthStencilRequested{false};
-    bool ramHighColorRequested{false};
-    bool ramVideoPlanesRequested{false};
-    bool ramCompositionRequested{false};
-    bool ramCompositionReady{false};
-    bool ramX5000Verified{false};
+    // Bits of debug.nred.ram.enabled. Boot arguments request classes and installed hooks make them available.
+    constexpr UInt32 kRAMBuffers      = 1U << 0;
+    constexpr UInt32 kRAMTextures     = 1U << 1;
+    constexpr UInt32 kRAMHighColor    = 1U << 2;
+    constexpr UInt32 kRAMVideoPlanes  = 1U << 3;
+    constexpr UInt32 kRAMDepthStencil = 1U << 4;
+    constexpr UInt32 kRAMComposition  = 1U << 5;
+    // Classes selected in IOAccelResource2::allocMemory().
+    constexpr UInt32 kRAMResourcePolicies =
+        kRAMTextures | kRAMHighColor | kRAMVideoPlanes | kRAMDepthStencil | kRAMComposition;
+
+    UInt32 ramRequested{0};
+    UInt32 ramAvailable{0};
+    UInt32 ramEnabled{0};
+    bool ramResourceRouteReady{false};
     bool scanoutLayoutRequested{false};
     mach_vm_address_t orgGetDisplayFlip{0};
     const OSMetaClass* acceleratorClass{nullptr};
     const OSMetaClass* sysMemoryClass{nullptr};
     const OSMetaClass* deviceCacheClass{nullptr};
+
+    bool ramPolicyEnabled(const UInt32 policies)
+    {
+        return (__atomic_load_n(&ramEnabled, __ATOMIC_ACQUIRE) & policies) == policies;
+    }
+
+    void makeRAMPolicyAvailable(const UInt32 policies)
+    {
+        __atomic_fetch_or(&ramAvailable, policies, __ATOMIC_RELEASE);
+        __atomic_fetch_or(&ramEnabled, policies & ramRequested, __ATOMIC_RELEASE);
+    }
+
+    enum class RAMClass : UInt8 {
+        None,
+        Buffer,
+        Private,
+        Color,
+        HighColor,
+        VideoPlane,
+        DepthStencil,
+        Composition,
+        CompositionPlane,
+        Count,
+    };
+
+    struct RAMCounter {
+        UInt64 count;
+        UInt64 bytes;
+    };
+
+    RAMCounter ramCounters[static_cast<size_t>(RAMClass::Count)]{};
+    UInt64 ramFailures{0};
+    static_assert(sizeof(UInt64) == sizeof(long long) && sizeof(UInt32) == sizeof(int), "sysctl value sizes");
+
+    void countRAMAllocation(const RAMClass ramClass, const bool placed, const UInt64 bytes)
+    {
+        if (!placed) {
+            __atomic_fetch_add(&ramFailures, 1, __ATOMIC_RELAXED);
+            return;
+        }
+        auto& counter = ramCounters[static_cast<size_t>(ramClass)];
+        __atomic_fetch_add(&counter.count, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&counter.bytes, bytes, __ATOMIC_RELAXED);
+    }
+
+    int handleRAMEnabled(struct sysctl_oid* const oid, void*, int, struct sysctl_req* const request)
+    {
+        auto value = static_cast<int>(__atomic_load_n(&ramEnabled, __ATOMIC_ACQUIRE));
+        const auto error = sysctl_handle_int(oid, &value, 0, request);
+        if (error != 0 || request->newptr == 0) { return error; }
+        const auto policies = static_cast<UInt32>(value);
+        if ((policies & ~__atomic_load_n(&ramAvailable, __ATOMIC_ACQUIRE)) != 0) { return EINVAL; }
+        __atomic_store_n(&ramEnabled, policies, __ATOMIC_RELEASE);
+        return 0;
+    }
+
+    SYSCTL_NODE(_debug, OID_AUTO, nred, CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, "NootedRed");
+    SYSCTL_NODE(_debug_nred, OID_AUTO, ram, CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, "Renoir system RAM placement");
+    SYSCTL_PROC(_debug_nred_ram, OID_AUTO, enabled, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, nullptr, 0,
+                handleRAMEnabled, "IU", "Placement classes used for new allocations");
+    SYSCTL_OID(_debug_nred_ram, OID_AUTO, available, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, &ramAvailable, 0,
+               sysctl_handle_int, "IU", "Placement classes with installed hooks");
+    // SYSCTL_QUAD adds a zero-length array size check, so declare the read-only counters directly.
+#define NRED_RAM_QUAD(name, value, description)                                                           \
+    SYSCTL_OID(_debug_nred_ram, OID_AUTO, name, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED, value, 0,      \
+               sysctl_handle_quad, "Q", description)
+#define NRED_RAM_COUNTERS(name, ramClass)                                                                 \
+    NRED_RAM_QUAD(name##_count, &ramCounters[static_cast<size_t>(RAMClass::ramClass)].count,              \
+                  "Allocations placed in RAM");                                                           \
+    NRED_RAM_QUAD(name##_bytes, &ramCounters[static_cast<size_t>(RAMClass::ramClass)].bytes,              \
+                  "Page-rounded bytes placed in RAM")
+    NRED_RAM_QUAD(failures, &ramFailures, "RAM attempts that fell back to the native path");
+    NRED_RAM_COUNTERS(buffer, Buffer);
+    NRED_RAM_COUNTERS(private, Private);
+    NRED_RAM_COUNTERS(color, Color);
+    NRED_RAM_COUNTERS(highcolor, HighColor);
+    NRED_RAM_COUNTERS(videoplane, VideoPlane);
+    NRED_RAM_COUNTERS(depthstencil, DepthStencil);
+    NRED_RAM_COUNTERS(composition, Composition);
+    NRED_RAM_COUNTERS(compositionplane, CompositionPlane);
+#undef NRED_RAM_COUNTERS
+#undef NRED_RAM_QUAD
+
+    void registerRAMControls()
+    {
+        static bool registered{false};
+        if (registered) { return; }
+        registered = true;
+        sysctl_oid* const controls[] = {
+            &sysctl__debug_nred,
+            &sysctl__debug_nred_ram,
+            &sysctl__debug_nred_ram_enabled,
+            &sysctl__debug_nred_ram_available,
+            &sysctl__debug_nred_ram_failures,
+            &sysctl__debug_nred_ram_buffer_count,
+            &sysctl__debug_nred_ram_buffer_bytes,
+            &sysctl__debug_nred_ram_private_count,
+            &sysctl__debug_nred_ram_private_bytes,
+            &sysctl__debug_nred_ram_color_count,
+            &sysctl__debug_nred_ram_color_bytes,
+            &sysctl__debug_nred_ram_highcolor_count,
+            &sysctl__debug_nred_ram_highcolor_bytes,
+            &sysctl__debug_nred_ram_videoplane_count,
+            &sysctl__debug_nred_ram_videoplane_bytes,
+            &sysctl__debug_nred_ram_depthstencil_count,
+            &sysctl__debug_nred_ram_depthstencil_bytes,
+            &sysctl__debug_nred_ram_composition_count,
+            &sysctl__debug_nred_ram_composition_bytes,
+            &sysctl__debug_nred_ram_compositionplane_count,
+            &sysctl__debug_nred_ram_compositionplane_bytes,
+        };
+        // Parents precede their children.
+        for (auto* const control : controls) { sysctl_register_oid(control); }
+    }
 
     bool isRenoirResource(void* const resource)
     {
@@ -260,27 +384,26 @@ namespace
         return false;
     }
 
-    bool useRAMTexture(void* const resource, const UInt32 flags, const RAMTextureKind kind)
+    RAMClass useRAMTexture(void* const resource, const UInt32 flags, const RAMTextureKind kind)
     {
         if (textureCopyKind(flags) == kDepthStencilCopyKind
             || getMember<void*>(resource, kSurfaceParamsOffset) != nullptr)
         {
-            return false;
+            return RAMClass::None;
         }
-        if (kind == RAMTextureKind::Color8) { return ramColorRequested; }
-        if ((kind != RAMTextureKind::HighColor || !ramHighColorRequested)
-            && (kind != RAMTextureKind::VideoPlane || !ramVideoPlanesRequested))
-        {
-            return false;
+        switch (kind) {
+            case RAMTextureKind::Color8: return ramPolicyEnabled(kRAMTextures) ? RAMClass::Color : RAMClass::None;
+            case RAMTextureKind::HighColor:
+                return ramPolicyEnabled(kRAMHighColor) && !hasSurfaceAuxStorage(resource) ? RAMClass::HighColor :
+                                                                                            RAMClass::None;
+            case RAMTextureKind::VideoPlane:
+                return ramPolicyEnabled(kRAMVideoPlanes) && !hasSurfaceAuxStorage(resource) ? RAMClass::VideoPlane :
+                                                                                              RAMClass::None;
+            default: return RAMClass::None;
         }
-        return !hasSurfaceAuxStorage(resource);
     }
 
-    bool wantsRAMTextureAllocation()
-    {
-        return ramColorRequested || ramDepthStencilRequested || ramHighColorRequested || ramVideoPlanesRequested
-               || ramCompositionRequested;
-    }
+    bool wantsRAMTextureAllocation() { return (ramRequested & kRAMResourcePolicies) != 0; }
 
     void logFirstRAMUse(volatile UInt32& logged, const char* const resource)
     {
@@ -535,45 +658,48 @@ extern "C" {
         "jmpq *_nredScanoutLayoutReturn(%rip)\n");
 }
 
-static bool nredRAMSelectComposition(void* const resource, void* const shared)
+static RAMClass nredRAMSelectComposition(void* const resource, void* const shared)
 {
     // initIOSurface records the display eligibility before the first allocation.
-    if (!__atomic_load_n(&ramCompositionReady, __ATOMIC_ACQUIRE)
+    if (!ramPolicyEnabled(kRAMComposition)
         || getMember<UInt8>(resource, kSurfaceFlagsOffset) != kSurfaceInitialized
         || getMember<void*>(resource, kSurfaceParamsOffset) == nullptr)
     {
-        return false;
+        return RAMClass::None;
     }
     const auto flags = getMember<UInt32>(resource, kTextureFlagsOffset);
     const auto format = textureFormat(flags);
     const auto copyKind = textureCopyKind(flags);
     const auto* const cache = getMember<OSObject*>(resource, kSharedSurfaceOffset);
     const auto hasDeviceCache = (getMember<UInt32>(resource, kResourceFlagsOffset) & kDeviceCacheFlag) != 0;
+    auto selected = RAMClass::Composition;
     if (copyKind == kLinearCopyKind && format == ATIFormat::Rg8) {
         // The native page-in copies between the two prepared maps for this plane.
-        if (!ramVideoPlanesRequested || hasDeviceCache || cache != nullptr || (flags & kStagedPageInFlag) != 0
+        if (!ramPolicyEnabled(kRAMVideoPlanes) || hasDeviceCache || cache != nullptr || (flags & kStagedPageInFlag) != 0
             || hasSurfaceAuxStorage(resource) || getMember<void*>(resource, kSurfaceDCCOffset) != nullptr)
         {
-            return false;
+            return RAMClass::None;
         }
+        selected = RAMClass::CompositionPlane;
     }
     else if (shared != nullptr || !hasDeviceCache || copyKind != kStagingCopyKind
              || ramTextureKind(format) != RAMTextureKind::Color8 || !isDeviceCache(cache))
     {
-        return false;
+        return RAMClass::None;
     }
 
     const auto* const backing = getMember<OSObject*>(resource, kBackingMemoryOffset);
-    return isRAMMemory(backing);
+    return isRAMMemory(backing) ? selected : RAMClass::None;
 }
 
-static bool nredRAMSelectAllocation(void* const resource, void* const shared)
+static RAMClass nredRAMSelectAllocation(void* const resource, void* const shared)
 {
-    if (!__atomic_load_n(&ramX5000Verified, __ATOMIC_ACQUIRE) || !isRenoirResource(resource)
+    // These classes become available only after the X5000 image has been verified.
+    if ((__atomic_load_n(&ramEnabled, __ATOMIC_ACQUIRE) & kRAMResourcePolicies) == 0 || !isRenoirResource(resource)
         || getMember<void*>(resource, kMainMemoryOffset) != nullptr
         || (getMember<UInt32>(resource, kResourceFlagsOffset) & kSpecialMemoryFlags) != 0)
     {
-        return false;
+        return RAMClass::None;
     }
 
     const auto type = getMember<UInt8>(resource, kResourceTypeOffset);
@@ -581,7 +707,7 @@ static bool nredRAMSelectAllocation(void* const resource, void* const shared)
     if (type != kStandardResourceType || shared == nullptr
         || getMember<void*>(resource, kSharedSurfaceOffset) != nullptr)
     {
-        return false;
+        return RAMClass::None;
     }
 
     const auto flags = getMember<UInt32>(resource, kTextureFlagsOffset);
@@ -590,20 +716,22 @@ static bool nredRAMSelectAllocation(void* const resource, void* const shared)
     // Private textures and Metal buffers use this copy path before their format is set.
     // Preserve the backing object and let the driver keep ownership of both allocations.
     if ((flags & 0xFF) == 0 && textureCopyKind(flags) == kPrivateCopyKind) {
-        return ramColorRequested && getMember<void*>(resource, kSurfaceParamsOffset) == nullptr
-               && isRAMMemory(backing);
+        return ramPolicyEnabled(kRAMTextures) && getMember<void*>(resource, kSurfaceParamsOffset) == nullptr
+                       && isRAMMemory(backing) ?
+                   RAMClass::Private :
+                   RAMClass::None;
     }
-    if (backing != nullptr) { return false; }
+    if (backing != nullptr) { return RAMClass::None; }
 
-    if (ramDepthStencilRequested && textureCopyKind(flags) == kDepthStencilCopyKind) {
+    if (ramPolicyEnabled(kRAMDepthStencil) && textureCopyKind(flags) == kDepthStencilCopyKind) {
         switch (textureFormat(flags)) {
             case ATIFormat::Depth16:
             case ATIFormat::Depth24Stencil8:
             case ATIFormat::Depth32:
             case ATIFormat::Depth32F:
             case ATIFormat::Depth32fStencil8:
-            case ATIFormat::Stencil8: return true;
-            default: return false;
+            case ATIFormat::Stencil8: return RAMClass::DepthStencil;
+            default: return RAMClass::None;
         }
     }
 
@@ -613,7 +741,8 @@ static bool nredRAMSelectAllocation(void* const resource, void* const shared)
 [[gnu::used, gnu::noinline]] static void* nredRAMAllocatePrimary(void* const accelerator, void* const resource,
                                                                void* const shared)
 {
-    if (!nredRAMSelectAllocation(resource, shared)) { return nullptr; }
+    const auto ramClass = nredRAMSelectAllocation(resource, shared);
+    if (ramClass == RAMClass::None) { return nullptr; }
 
     const auto bytes = getMember<UInt64>(resource, kResourceSizeOffset);
     if (bytes == 0 || bytes > UINT64_MAX - PAGE_MASK) { return nullptr; }
@@ -622,6 +751,7 @@ static bool nredRAMSelectAllocation(void* const resource, void* const shared)
     // continuation records the successful result and a failed attempt leaves the slots intact.
     const auto aligned = (bytes + PAGE_MASK) & ~static_cast<UInt64>(PAGE_MASK);
     auto* const memory = createRAMPrimary(accelerator, nullptr, shared, resource, 0x363, aligned, true);
+    countRAMAllocation(ramClass, memory != nullptr, aligned);
     if (memory != nullptr) {
         static volatile UInt32 loggedComposition{0};
         static volatile UInt32 logged{0};
@@ -660,16 +790,22 @@ static bool nredRAMSelectAllocation(void* const resource, void* const shared)
 
 void X5000::init()
 {
-    this->ramBuffersRequested = checkKernelArgument("-NRedRAMBuffers");
-    ramColorRequested         = checkKernelArgument("-NRedRAMTextures");
-    ramDepthStencilRequested  = checkKernelArgument("-NRedRAMDepthStencil");
-    ramHighColorRequested     = checkKernelArgument("-NRedRAMHighColor");
-    ramVideoPlanesRequested   = checkKernelArgument("-NRedRAMVideoPlanes");
-    ramCompositionRequested   = checkKernelArgument("-NRedRAMComposition");
-    scanoutLayoutRequested    = checkKernelArgument("-NRedScanoutLayout");
-    if (this->ramBuffersRequested || wantsRAMTextureAllocation()) {
-        lilu.onKextLoadForce(&kextIOAcceleratorFamily2);
+    const struct {
+        const char* argument;
+        UInt32 policy;
+    } options[] = {
+        {"-NRedRAMBuffers", kRAMBuffers},
+        {"-NRedRAMTextures", kRAMTextures},
+        {"-NRedRAMHighColor", kRAMHighColor},
+        {"-NRedRAMVideoPlanes", kRAMVideoPlanes},
+        {"-NRedRAMDepthStencil", kRAMDepthStencil},
+        {"-NRedRAMComposition", kRAMComposition},
+    };
+    for (const auto& option : options) {
+        if (checkKernelArgument(option.argument)) { ramRequested |= option.policy; }
     }
+    scanoutLayoutRequested = checkKernelArgument("-NRedScanoutLayout");
+    if (ramRequested != 0) { lilu.onKextLoadForce(&kextIOAcceleratorFamily2); }
 }
 
 namespace
@@ -735,7 +871,7 @@ namespace
         SYSLOG("Scanout", "Renoir display layout route %s", installed ? "installed" : "failed");
     }
 
-    void installRAMTextureRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+    bool installRAMTextureRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
                                const size_t size)
     {
         const auto function = patcher.solveSymbol(id, "__ZN16IOAccelResource211allocMemoryEP14IOAccelShared2", slide, size);
@@ -751,14 +887,14 @@ namespace
             || !matchesCode(function, slide, size, kAllocStoreOffset, kAllocStore))
         {
             SYSLOG("RAMResources", "Unsupported IOAcceleratorFamily2 texture allocation path");
-            return;
+            return false;
         }
         SInt32 displacement{0};
         memcpy(&displacement, reinterpret_cast<const void*>(function + kRAMResultOffset - sizeof(displacement)),
                sizeof(displacement));
         if (function + kRAMResultOffset + static_cast<mach_vm_address_t>(displacement) != allocator) {
             SYSLOG("RAMResources", "Unexpected allocator in IOAcceleratorFamily2 allocation path");
-            return;
+            return false;
         }
 
         createRAMPrimary     = reinterpret_cast<CreateSysMemory>(allocator);
@@ -767,10 +903,11 @@ namespace
         nredRAMAllocResult   = function + kRAMResultOffset;
         const auto installed = routeRAMBranch(patcher, id, function + kAllocBranchOffset, nredRAMAllocBranch);
         SYSLOG("RAMResources", "Texture allocation route %s", installed ? "installed" : "failed");
+        return installed;
     }
 }
 
-void X5000::installRAMBufferRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
+bool X5000::installRAMBufferRoute(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide,
                                  const size_t size)
 {
     const auto entry = patcher.solveSymbol(id, kAllocDataBufferMemory, slide, size);
@@ -783,7 +920,7 @@ void X5000::installRAMBufferRoute(KernelPatcher& patcher, const size_t id, const
         || entry - slide > size - kSystemCallEnd)
     {
         SYSLOG("RAMBuffers", "System RAM allocation entry points unavailable");
-        return;
+        return false;
     }
 
     const auto* const code = reinterpret_cast<const UInt8*>(entry);
@@ -796,7 +933,7 @@ void X5000::installRAMBufferRoute(KernelPatcher& patcher, const size_t id, const
         || callTarget != systemAllocator)
     {
         SYSLOG("RAMBuffers", "Unsupported IOAcceleratorFamily2 buffer allocator");
-        return;
+        return false;
     }
 
     KernelPatcher::RouteRequest request{kAllocDataBufferMemory, wrapAllocDataBufferMemory,
@@ -804,17 +941,18 @@ void X5000::installRAMBufferRoute(KernelPatcher& patcher, const size_t id, const
     if (!patcher.routeMultipleLong(id, &request, 1, slide, size)) {
         patcher.clearError();
         SYSLOG("RAMBuffers", "Could not route data buffer allocation");
-        return;
+        return false;
     }
 
     SYSLOG("RAMBuffers", "Installed native system RAM route for Renoir data buffers");
+    return true;
 }
 
 bool X5000::wrapAllocDataBufferMemory(void* const resource, void* const shared, const bool preferVRAM,
                                       const UInt32 options)
 {
     const auto original = FunctionCast(wrapAllocDataBufferMemory, singleton().orgAllocDataBufferMemory);
-    if (!preferVRAM || shared == nullptr || !isRenoirResource(resource)
+    if (!preferVRAM || shared == nullptr || !ramPolicyEnabled(kRAMBuffers) || !isRenoirResource(resource)
         || getMember<UInt8>(resource, kResourceTypeOffset) != kDataBufferType
         || getMember<void*>(resource, kMainMemoryOffset) != nullptr)
     {
@@ -822,8 +960,12 @@ bool X5000::wrapAllocDataBufferMemory(void* const resource, void* const shared, 
     }
 
     const auto allocated = original(resource, shared, false, options);
+    const auto* const memory = allocated ? getMember<OSObject*>(resource, kMainMemoryOffset) : nullptr;
+    const auto bytes = getMember<UInt64>(resource, kResourceSizeOffset);
+    countRAMAllocation(RAMClass::Buffer, isRAMMemory(memory),
+                       bytes > UINT64_MAX - PAGE_MASK ? bytes : (bytes + PAGE_MASK) & ~static_cast<UInt64>(PAGE_MASK));
     static volatile UInt32 logged{0};
-    if (allocated && getMember<void*>(resource, kMainMemoryOffset) != nullptr && OSCompareAndSwap(0, 1, &logged)) {
+    if (memory != nullptr && OSCompareAndSwap(0, 1, &logged)) {
         SYSLOG("RAMBuffers", "Allocated first Renoir data buffer in system RAM");
     }
     return allocated || original(resource, shared, preferVRAM, options);
@@ -831,9 +973,7 @@ bool X5000::wrapAllocDataBufferMemory(void* const resource, void* const shared, 
 
 void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_address_t slide, const size_t size)
 {
-    if ((this->ramBuffersRequested || wantsRAMTextureAllocation())
-        && kextIOAcceleratorFamily2.loadIndex == id)
-    {
+    if (ramRequested != 0 && kextIOAcceleratorFamily2.loadIndex == id) {
         const auto memoryClass = patcher.solveSymbol(id, "__ZN16IOAccelSysMemory10gMetaClassE", slide, size);
         patcher.clearError();
         if (memoryClass == 0) {
@@ -841,15 +981,17 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
             return;
         }
         __atomic_store_n(&sysMemoryClass, reinterpret_cast<const OSMetaClass*>(memoryClass), __ATOMIC_RELEASE);
-        if (this->ramBuffersRequested) { this->installRAMBufferRoute(patcher, id, slide, size); }
-        if (wantsRAMTextureAllocation()) { installRAMTextureRoute(patcher, id, slide, size); }
+        if ((ramRequested & kRAMBuffers) != 0 && this->installRAMBufferRoute(patcher, id, slide, size)) {
+            makeRAMPolicyAvailable(kRAMBuffers);
+        }
+        ramResourceRouteReady = wantsRAMTextureAllocation() && installRAMTextureRoute(patcher, id, slide, size);
         return;
     }
     if (kextRadeonX5000.loadIndex != id) { return; }
 
     NRed::singleton().hwLateInit();
 
-    if (this->ramBuffersRequested || wantsRAMTextureAllocation()) {
+    if (ramRequested != 0) {
         // The selectors only accept resources owned by this accelerator class.
         const auto metaClass = patcher.solveSymbol(
             id, "__ZN43AMDRadeonX5000_AMDVega10GraphicsAccelerator10gMetaClassE", slide, size);
@@ -857,18 +999,22 @@ void X5000::processKext(KernelPatcher& patcher, const size_t id, const mach_vm_a
         if (metaClass == 0) { SYSLOG("RAMResources", "Renoir accelerator metaclass unavailable"); }
         __atomic_store_n(&acceleratorClass, reinterpret_cast<const OSMetaClass*>(metaClass), __ATOMIC_RELEASE);
     }
-    if (wantsRAMTextureAllocation()) {
-        const auto verified = matchesImage(slide, size, kX5000UUID);
-        __atomic_store_n(&ramX5000Verified, verified, __ATOMIC_RELEASE);
-        if (!verified) {
+    if (ramResourceRouteReady) {
+        if (!matchesImage(slide, size, kX5000UUID)) {
             SYSLOG("RAMResources", "Unsupported X5000 image for texture placement");
         }
-        else if (ramCompositionRequested) {
-            const auto protectedFlip = installRAMCompositionGuard(patcher, id, slide, size);
-            __atomic_store_n(&ramCompositionReady, protectedFlip, __ATOMIC_RELEASE);
-            SYSLOG("RAMResources", "Composition cache RAM placement %s", protectedFlip ? "enabled" : "disabled");
+        else {
+            // Composition caches also need the display flip guard, installed only when requested at boot.
+            auto available = kRAMResourcePolicies & ~kRAMComposition;
+            if ((ramRequested & kRAMComposition) != 0) {
+                const auto protectedFlip = installRAMCompositionGuard(patcher, id, slide, size);
+                SYSLOG("RAMResources", "Composition cache RAM placement %s", protectedFlip ? "enabled" : "disabled");
+                if (protectedFlip) { available |= kRAMComposition; }
+            }
+            makeRAMPolicyAvailable(available);
         }
     }
+    if (__atomic_load_n(&ramAvailable, __ATOMIC_ACQUIRE) != 0) { registerRAMControls(); }
 
     UInt32*           orgChannelTypes;
     mach_vm_address_t orgStartHWEngines;
